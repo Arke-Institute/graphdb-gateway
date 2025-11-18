@@ -9,6 +9,9 @@ import {
   CreatePIRequest,
   QueryChildrenRequest,
   QueryChildrenResponse,
+  ListEntitiesRequest,
+  ListEntitiesResponse,
+  EntityWithSource,
   CreateEntityRequest,
   MergeEntityRequest,
   CreateRelationshipsRequest,
@@ -166,6 +169,73 @@ async function handleQueryChildren(env: Env, body: QueryChildrenRequest): Promis
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to query children',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /entities/list
+ * List all entities from specified PI(s) with deduplication
+ */
+async function handleListEntities(env: Env, body: ListEntitiesRequest): Promise<Response> {
+  try {
+    const { pi, pis, type } = body;
+
+    // Validate: must provide either pi or pis
+    if (!pi && (!pis || pis.length === 0)) {
+      return errorResponse(
+        'Must provide either "pi" (string) or "pis" (array of strings)',
+        'VALIDATION_ERROR',
+        null,
+        400
+      );
+    }
+
+    // Normalize to array
+    const piArray = pi ? [pi] : pis!;
+
+    // Build Cypher query with optional type filter
+    // This query deduplicates entities by canonical_id and collects all source PIs
+    const query = `
+      MATCH (pi:PI)<-[:EXTRACTED_FROM]-(e:Entity)
+      WHERE pi.id IN $pis
+        AND ($type IS NULL OR e.type = $type)
+      WITH e, collect(DISTINCT pi.id) AS source_pis
+      RETURN DISTINCT
+        e.canonical_id AS canonical_id,
+        e.code AS code,
+        e.label AS label,
+        e.type AS type,
+        e.properties AS properties,
+        source_pis
+      ORDER BY e.type, e.label
+    `;
+
+    const { records } = await executeQuery(env, query, {
+      pis: piArray,
+      type: type || null,
+    });
+
+    const entities: EntityWithSource[] = records.map((record) => ({
+      canonical_id: record.get('canonical_id'),
+      code: record.get('code'),
+      label: record.get('label'),
+      type: record.get('type'),
+      properties: record.get('properties') ? JSON.parse(record.get('properties')) : {},
+      source_pis: record.get('source_pis'),
+    }));
+
+    const response: ListEntitiesResponse = {
+      entities,
+      total_count: entities.length,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to list entities',
       error.code,
       { stack: error.stack }
     );
@@ -399,6 +469,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         endpoints: [
           'POST /pi/create',
           'POST /entities/query_children',
+          'POST /entities/list',
           'POST /entity/create',
           'POST /entity/merge',
           'POST /relationships/create',
@@ -428,6 +499,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
       case '/entities/query_children':
         return await handleQueryChildren(env, body);
+
+      case '/entities/list':
+        return await handleListEntities(env, body);
 
       case '/entity/create':
         return await handleCreateEntity(env, body);

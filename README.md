@@ -11,6 +11,7 @@
 A high-performance RESTful API gateway deployed on Cloudflare's edge network that provides seamless access to Neo4j graph database operations. Built for the Arke Institute's entity linking pipeline.
 
 **Production URL:** https://graphdb-gateway.arke.institute
+Worker Name: graphdb-gateway
 
 ## Features
 
@@ -67,6 +68,34 @@ Content-Type: application/json
   "pi": "01KA1H53CP...",
   "label": "Dr Gillingham",
   "type": "person"
+}
+```
+
+### List Entities
+```http
+POST /entities/list
+Content-Type: application/json
+
+{
+  "pi": "01PAPER_001",       // Single PI
+  // OR
+  "pis": ["01PAPER_001", "01PAPER_002"],  // Multiple PIs
+  "type": "person"            // Optional: filter by type
+}
+
+// Returns deduplicated entities with source_pis array
+{
+  "entities": [
+    {
+      "canonical_id": "uuid_123",
+      "code": "dr_chen",
+      "label": "Dr. Chen",
+      "type": "person",
+      "properties": {...},
+      "source_pis": ["01PAPER_001", "01PAPER_002"]
+    }
+  ],
+  "total_count": 1
 }
 ```
 

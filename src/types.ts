@@ -35,6 +35,26 @@ export interface QueryChildrenResponse {
   candidates: EntityCandidate[];
 }
 
+export interface ListEntitiesRequest {
+  pi?: string;             // Single PI ID
+  pis?: string[];          // OR array of PI IDs
+  type?: string;           // Optional: filter by entity type
+}
+
+export interface EntityWithSource {
+  canonical_id: string;
+  code: string;
+  label: string;
+  type: string;
+  properties: Record<string, any>;
+  source_pis: string[];    // Array of source PIs (deduplicated)
+}
+
+export interface ListEntitiesResponse {
+  entities: EntityWithSource[];
+  total_count: number;
+}
+
 export interface CreateEntityRequest {
   canonical_id: string;
   code: string;
