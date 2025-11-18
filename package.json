@@ -1,0 +1,32 @@
+{
+  "name": "graphdb-gateway",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker gateway to Neo4j graph database.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "logs": "wrangler tail",
+    "test": "node tests/test-neo4j.js",
+    "test:neo4j": "node tests/test-neo4j.js",
+    "test:endpoints": "./tests/test-endpoints.sh",
+    "test:production": "./tests/test-production.sh",
+    "populate": "node scripts/populate-sample-data.js",
+    "explore": "node tests/explore-data.js",
+    "cleanup": "node scripts/cleanup-test-data.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "neo4j-driver": "~5.28.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251118.0",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.49.0"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "graphdb-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-11-18",
+
+  // Worker configuration
+  "limits": {
+    "cpu_ms": 30000  // 30 seconds timeout
+  },
+
+  // Environment variables for local development
+  // Production secrets should be set via: wrangler secret put <KEY>
+  "vars": {
+    "NEO4J_DATABASE": "neo4j"
+  },
+
+  // Build configuration
+  "build": {
+    "command": "npx tsc"
+  },
+
+  // Observability
+  "observability": {
+    "enabled": true
+  },
+
+  "routes": [
+    {
+      "pattern": "graphdb-gateway.arke.institute",
+      "custom_domain": true
+    }
+  ]
+}
