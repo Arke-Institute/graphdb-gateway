@@ -43,6 +43,26 @@ export async function handleCreateEntity(
       );
     }
 
+    // Check if entity already exists
+    const checkQuery = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+      RETURN e.canonical_id as canonical_id, e.code as code
+    `;
+
+    const { records: existingRecords } = await executeQuery(env, checkQuery, { canonical_id });
+
+    if (existingRecords.length > 0) {
+      return errorResponse(
+        `Entity with canonical_id ${canonical_id} already exists. Use /entity/merge to update it.`,
+        ERROR_CODES.ENTITY_ALREADY_EXISTS,
+        {
+          canonical_id,
+          existing_code: existingRecords[0].get('code')
+        },
+        409
+      );
+    }
+
     // Determine if entity should have a subtype label
     let entityLabel = 'Entity';
     if (type === 'date') {

@@ -13,7 +13,12 @@ import {
   handleFindInHierarchy,
   handleGetEntitiesHierarchy,
 } from './handlers/hierarchy';
-import { handleCreateRelationships } from './handlers/relationship';
+import {
+  handleCreateRelationships,
+  handleMergeRelationships,
+  handleListRelationships,
+} from './handlers/relationship';
+import { handleClearAllData, handleCustomQuery } from './handlers/admin';
 import { errorResponse, handleOptions, jsonResponse } from './utils/response';
 import { ERROR_CODES, API_VERSION, SERVICE_NAME } from './constants';
 import { Env } from './types';
@@ -36,6 +41,10 @@ const routes: RouteTable = {
   'POST /entities/list': handleListEntities,
   'POST /entities/hierarchy': handleGetEntitiesHierarchy,
   'POST /relationships/create': handleCreateRelationships,
+  'POST /relationships/merge': handleMergeRelationships,
+  'GET /relationships': (env: Env) => handleListRelationships(env),
+  'POST /query': handleCustomQuery,
+  'POST /admin/clear': (env: Env) => handleClearAllData(env),
 };
 
 /**
@@ -50,6 +59,10 @@ const ENDPOINTS = [
   'POST /entities/list',
   'POST /entities/hierarchy',
   'POST /relationships/create',
+  'POST /relationships/merge',
+  'GET /relationships',
+  'POST /query',
+  'POST /admin/clear',
 ];
 
 /**
@@ -86,50 +99,43 @@ export async function handleRequest(
     }
   }
 
-  // Only accept POST requests for API endpoints
-  if (request.method !== 'POST') {
-    return errorResponse(
-      'Method not allowed',
-      ERROR_CODES.METHOD_NOT_ALLOWED,
-      null,
-      405
-    );
-  }
-
-  // Parse request body
-  let body: any;
-  try {
-    body = await request.json();
-  } catch (error) {
-    return errorResponse(
-      'Invalid JSON body',
-      ERROR_CODES.INVALID_JSON,
-      null,
-      400
-    );
-  }
-
   // Route to appropriate handler
   const routeKey = `${request.method} ${path}`;
   const handler = routes[routeKey];
 
-  if (handler) {
+  if (!handler) {
+    // Route not found
+    return errorResponse(
+      'Endpoint not found',
+      ERROR_CODES.NOT_FOUND,
+      { path, method: request.method },
+      404
+    );
+  }
+
+  // Parse request body for POST requests
+  let body: any = {};
+  if (request.method === 'POST') {
     try {
-      return await handler(env, body);
-    } catch (error: any) {
+      body = await request.json();
+    } catch (error) {
       return errorResponse(
-        'Internal server error',
-        ERROR_CODES.INTERNAL_ERROR,
-        { message: error.message, stack: error.stack }
+        'Invalid JSON body',
+        ERROR_CODES.INVALID_JSON,
+        null,
+        400
       );
     }
   }
 
-  // Route not found
-  return errorResponse(
-    'Endpoint not found',
-    ERROR_CODES.NOT_FOUND,
-    { path, method: request.method },
-    404
-  );
+  // Execute handler
+  try {
+    return await handler(env, body);
+  } catch (error: any) {
+    return errorResponse(
+      'Internal server error',
+      ERROR_CODES.INTERNAL_ERROR,
+      { message: error.message, stack: error.stack }
+    );
+  }
 }

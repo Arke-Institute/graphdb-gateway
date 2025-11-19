@@ -78,6 +78,9 @@ Content-Type: application/json
   "properties": {"role": "researcher"},
   "source_pi": "01KA1H53CP..."
 }
+
+// Returns 409 Conflict if entity already exists
+// Error directs to use /entity/merge instead
 ```
 
 #### Merge Entity (Enhanced with Strategies)
@@ -209,6 +212,104 @@ Content-Type: application/json
     }
   ]
 }
+
+// Note: Allows duplicate relationships
+// Use /relationships/merge for idempotent behavior
+```
+
+#### Merge Relationships (Idempotent)
+```http
+POST /relationships/merge
+Content-Type: application/json
+
+{
+  "relationships": [
+    {
+      "subject_id": "uuid_123",
+      "predicate": "affiliated_with",
+      "object_id": "uuid_456",
+      "properties": {"since": "2020"},
+      "source_pi": "01KA1H53CP..."
+    }
+  ]
+}
+
+// Response
+{
+  "success": true,
+  "message": "Relationships merged successfully",
+  "data": {
+    "count": 1,
+    "relationshipsCreated": 1,
+    "relationshipsUpdated": 0
+  }
+}
+
+// Uniqueness key: (subject_id, predicate, object_id, source_pi)
+// First call: Creates relationship
+// Subsequent calls: Updates properties, prevents duplicates
+```
+
+#### List All Relationships
+```http
+GET /relationships
+
+// Response
+{
+  "relationships": [
+    {
+      "subject_id": "uuid_123",
+      "predicate": "affiliated_with",
+      "object_id": "uuid_456",
+      "properties": {"since": "2020"},
+      "source_pi": "01KA1H53CP...",
+      "created_at": "2025-11-19T22:00:00Z"
+    }
+  ],
+  "total_count": 32
+}
+```
+
+### Admin Operations
+
+#### Custom Query
+```http
+POST /query
+Content-Type: application/json
+
+{
+  "query": "MATCH (e:Entity) RETURN count(e) as entity_count",
+  "params": {}  // Optional parameters
+}
+
+// Response
+{
+  "results": [{"entity_count": 100}],
+  "count": 1,
+  "summary": {
+    "counters": {...},
+    "queryType": "r"
+  }
+}
+```
+
+#### Clear All Data
+```http
+POST /admin/clear
+Content-Type: application/json
+
+{}
+
+// Response
+{
+  "success": true,
+  "message": "All data cleared successfully",
+  "data": {
+    "deleted_nodes": 37,
+    "deleted_relationships": 70,
+    "cleared": true
+  }
+}
 ```
 
 ## Architecture
@@ -271,8 +372,9 @@ graphdb-gateway/
 │   ├── handlers/             # Domain-specific handlers
 │   │   ├── pi.ts            # PI operations
 │   │   ├── entity.ts        # Entity CRUD operations
-│   │   ├── hierarchy.ts     # Hierarchy traversal (NEW)
-│   │   └── relationship.ts  # Relationship operations
+│   │   ├── hierarchy.ts     # Hierarchy traversal
+│   │   ├── relationship.ts  # Relationship operations
+│   │   └── admin.ts         # Admin operations (query, clear)
 │   ├── types/                # TypeScript type definitions
 │   │   ├── index.ts         # Re-exports
 │   │   ├── common.ts        # Shared types

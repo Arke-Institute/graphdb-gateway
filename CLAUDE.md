@@ -301,10 +301,12 @@ Entity references can appear in properties:
 
 ### Entity Operations
 
-**POST /entity/create** - Create new entity
+**POST /entity/create** - Create new entity (strict, fails on duplicate)
 - Simple storage (does NOT resolve entity refs)
 - Accepts clean properties only
 - Creates EXTRACTED_FROM relationship to source PI
+- **Returns 409 Conflict if entity with canonical_id already exists**
+- Error message directs to use `/entity/merge` instead
 
 **POST /entity/merge** - Merge entity with existing entity
 - Supports 4 merge strategies:
@@ -341,9 +343,39 @@ Entity references can appear in properties:
 
 ### Relationship Operations
 
-**POST /relationships/create** - Batch create relationships
+**POST /relationships/create** - Batch create relationships (allows duplicates)
 - Creates multiple relationships in one request
 - Uses UNWIND for efficient batch processing
+- **Note**: Uses CREATE, so calling multiple times creates duplicates
+- Use `/relationships/merge` for idempotent behavior
+
+**POST /relationships/merge** - Batch merge relationships (idempotent)
+- Idempotent alternative to `/relationships/create`
+- Uses MERGE with uniqueness key: `(subject_id, predicate, object_id, source_pi)`
+- First call creates relationship, subsequent calls update properties
+- Prevents duplicate relationships
+- Returns `relationshipsCreated` and `relationshipsUpdated` counts
+- **Recommended for orchestrator use**
+
+**GET /relationships** - List all relationships
+- Returns all RELATIONSHIP edges in the database
+- Includes subject_id, predicate, object_id, properties, source_pi
+- Ordered by created_at descending
+- Used for debugging and testing
+
+### Admin Operations
+
+**POST /query** - Execute custom Cypher query
+- Allows arbitrary Cypher queries for debugging/testing
+- Accepts `query` (required) and `params` (optional)
+- Returns results with Neo4j type conversions
+- **Use with caution** - no query validation
+
+**POST /admin/clear** - Clear all data from database
+- Deletes all nodes and relationships
+- **Destructive operation** - use only for testing
+- Returns count of deleted nodes and relationships
+- Used for cleanup between test runs
 
 ### Merge Strategies Explained
 
