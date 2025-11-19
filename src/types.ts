@@ -93,3 +93,30 @@ export interface SuccessResponse {
   message?: string;
   data?: any;
 }
+
+export interface QueryEntityRequest {
+  code: string;
+}
+
+export interface EntityRelationship {
+  type: string;
+  direction: 'outgoing' | 'incoming';
+  target_code: string;
+  target_label: string;
+  target_type: string;
+  target_canonical_id: string;
+  properties: Record<string, any>;
+}
+
+export interface QueryEntityResponse {
+  found: boolean;
+  entity?: {
+    canonical_id: string;
+    code: string;
+    label: string;
+    type: string;
+    properties: Record<string, any>;
+    source_pis: string[];
+  };
+  relationships?: EntityRelationship[];
+}

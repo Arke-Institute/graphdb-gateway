@@ -15,6 +15,9 @@ import {
   CreateEntityRequest,
   MergeEntityRequest,
   CreateRelationshipsRequest,
+  QueryEntityRequest,
+  QueryEntityResponse,
+  EntityRelationship,
   ErrorResponse,
   SuccessResponse,
 } from './types';
@@ -448,6 +451,106 @@ async function handleCreateRelationships(env: Env, body: CreateRelationshipsRequ
 }
 
 /**
+ * POST /entity/query
+ * Query entity by code and return all its relationships
+ */
+async function handleQueryEntity(env: Env, body: QueryEntityRequest): Promise<Response> {
+  try {
+    const { code } = body;
+
+    if (!code) {
+      return errorResponse(
+        'Missing required field: code',
+        'VALIDATION_ERROR',
+        null,
+        400
+      );
+    }
+
+    // Query for entity and its relationships
+    const query = `
+      MATCH (e:Entity {code: $code})
+      OPTIONAL MATCH (e)-[r_out]->(target_out:Entity)
+      OPTIONAL MATCH (source_in:Entity)-[r_in]->(e)
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+
+      WITH e,
+           collect(DISTINCT pi.id) as source_pis,
+           collect(DISTINCT {
+             type: type(r_out),
+             direction: 'outgoing',
+             target_code: target_out.code,
+             target_label: target_out.label,
+             target_type: target_out.type,
+             target_canonical_id: target_out.canonical_id,
+             properties: properties(r_out)
+           }) as outgoing_rels,
+           collect(DISTINCT {
+             type: type(r_in),
+             direction: 'incoming',
+             target_code: source_in.code,
+             target_label: source_in.label,
+             target_type: source_in.type,
+             target_canonical_id: source_in.canonical_id,
+             properties: properties(r_in)
+           }) as incoming_rels
+
+      RETURN e.canonical_id AS canonical_id,
+             e.code AS code,
+             e.label AS label,
+             e.type AS type,
+             e.properties AS properties,
+             source_pis,
+             outgoing_rels + incoming_rels AS relationships
+    `;
+
+    const { records } = await executeQuery(env, query, { code });
+
+    if (records.length === 0) {
+      const response: QueryEntityResponse = {
+        found: false,
+      };
+      return jsonResponse(response);
+    }
+
+    const record = records[0];
+    const relationships: EntityRelationship[] = record
+      .get('relationships')
+      .filter((rel: any) => rel.type !== null) // Filter out null relationships
+      .map((rel: any) => ({
+        type: rel.type,
+        direction: rel.direction,
+        target_code: rel.target_code,
+        target_label: rel.target_label,
+        target_type: rel.target_type,
+        target_canonical_id: rel.target_canonical_id,
+        properties: rel.properties || {},
+      }));
+
+    const response: QueryEntityResponse = {
+      found: true,
+      entity: {
+        canonical_id: record.get('canonical_id'),
+        code: record.get('code'),
+        label: record.get('label'),
+        type: record.get('type'),
+        properties: record.get('properties') ? JSON.parse(record.get('properties')) : {},
+        source_pis: record.get('source_pis'),
+      },
+      relationships,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to query entity',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
  * Router function
  */
 async function handleRequest(request: Request, env: Env): Promise<Response> {
@@ -472,6 +575,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
           'POST /entities/list',
           'POST /entity/create',
           'POST /entity/merge',
+          'POST /entity/query',
           'POST /relationships/create',
         ],
       });
@@ -512,6 +616,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       case '/relationships/create':
         return await handleCreateRelationships(env, body);
 
+      case '/entity/query':
+        return await handleQueryEntity(env, body);
+
       case '/':
       case '/health':
         return jsonResponse({
@@ -521,8 +628,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
           endpoints: [
             'POST /pi/create',
             'POST /entities/query_children',
+            'POST /entities/list',
             'POST /entity/create',
             'POST /entity/merge',
+            'POST /entity/query',
             'POST /relationships/create',
           ],
         });
