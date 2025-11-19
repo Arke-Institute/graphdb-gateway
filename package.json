@@ -13,7 +13,8 @@
     "test:production": "./tests/test-production.sh",
     "populate": "node scripts/populate-sample-data.js",
     "explore": "node tests/explore-data.js",
-    "cleanup": "node scripts/cleanup-test-data.js"
+    "cleanup": "node scripts/cleanup-test-data.js",
+    "add-indexes": "node scripts/add-indexes.js"
   },
   "keywords": [],
   "author": "",

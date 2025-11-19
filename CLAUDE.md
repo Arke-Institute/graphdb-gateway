@@ -1,0 +1,469 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+GraphDB Gateway Worker is a Cloudflare Worker that provides a RESTful API gateway to Neo4j AuraDB for entity linking operations. It's part of the Arke Institute's entity linking pipeline, deployed at https://graphdb-gateway.arke.institute.
+
+**Technology Stack**:
+- Runtime: Cloudflare Workers (V8 isolates, edge-deployed)
+- Language: TypeScript 5.9
+- Database: Neo4j AuraDB 5.27
+- Driver: neo4j-driver 5.28
+- Deploy: Wrangler CLI
+
+## Development Commands
+
+```bash
+# Install dependencies
+npm install
+
+# Local development server
+npm run dev                  # Start Wrangler dev server
+
+# Testing
+npm test                     # Test Neo4j connectivity
+npm run test:neo4j          # Same as npm test
+npm run test:endpoints      # Test API endpoints locally (requires dev server running)
+npm run test:production     # Test production deployment
+
+# Database utilities
+npm run populate            # Add sample data to Neo4j
+npm run explore             # View database contents
+npm run cleanup             # Remove test data
+npm run add-indexes         # Add performance indexes to Neo4j
+
+# Deployment
+npm run deploy              # Deploy to Cloudflare
+npm run logs                # View production logs
+```
+
+### Environment Setup
+
+Create `.dev.vars` file for local development:
+```env
+NEO4J_URI=neo4j+s://xxx.databases.neo4j.io
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your-password
+NEO4J_DATABASE=neo4j
+```
+
+For production, set secrets via Wrangler:
+```bash
+npx wrangler secret put NEO4J_URI
+npx wrangler secret put NEO4J_USERNAME
+npx wrangler secret put NEO4J_PASSWORD
+```
+
+## Architecture
+
+### High-Level Structure
+
+```
+Orchestrator (entity linking pipeline)
+     ↓
+[GraphDB Gateway Worker] (Cloudflare edge)
+     ↓ (neo4j+s://)
+Neo4j AuraDB (graph database)
+```
+
+### Code Organization
+
+The codebase is organized in a modular structure:
+
+```
+src/
+├── index.ts              # Entry point (minimal, delegates to router)
+├── router.ts             # Route matching and handler dispatch
+├── constants.ts          # CORS headers, error codes, config
+├── neo4j.ts              # Neo4j connection management
+│
+├── handlers/             # Request handlers by domain
+│   ├── pi.ts            # PI creation and management
+│   ├── entity.ts        # Entity CRUD (create, merge, query, list)
+│   ├── hierarchy.ts     # Hierarchy lookups (find-in-hierarchy, entities/hierarchy)
+│   └── relationship.ts  # Relationship creation
+│
+├── types/                # Type definitions by domain
+│   ├── index.ts         # Re-exports all types
+│   ├── common.ts        # Env, ErrorResponse, SuccessResponse
+│   ├── pi.ts            # PI-related types
+│   ├── entity.ts        # Entity-related types
+│   ├── hierarchy.ts     # Hierarchy-related types
+│   └── relationship.ts  # Relationship-related types
+│
+└── utils/                # Shared utilities
+    ├── response.ts      # jsonResponse, errorResponse, handleOptions
+    └── validation.ts    # Input validation helpers
+```
+
+**Benefits of this structure**:
+- Separation of concerns (each file focuses on one domain)
+- Easier testing (can test handlers independently)
+- Better type organization (types grouped by feature)
+- Reusable utilities (response helpers, validation)
+- Scalability (easy to add new endpoints)
+
+### Cloudflare Workers Pattern
+
+The worker uses a **stateless request handler** pattern:
+1. Export a `fetch` handler as the entry point
+2. Parse request URL and body
+3. Route to appropriate handler function
+4. Return JSON response with CORS headers
+
+Important: Cloudflare Workers are stateless V8 isolates, so each request creates a new Neo4j driver instance and closes it after the query.
+
+### Neo4j Connection Management
+
+**Key Pattern** (src/neo4j.ts):
+```typescript
+// Create driver per-request, close after query
+export async function executeQuery(env, query, params) {
+  const driver = createDriver(env);
+  try {
+    const result = await driver.executeQuery(query, params);
+    return { records, summary };
+  } finally {
+    await driver.close();  // Always close!
+  }
+}
+```
+
+**Why this pattern?**
+- Cloudflare Workers are stateless and short-lived
+- Creating/closing drivers per-request is the recommended approach for edge functions
+- The neo4j-driver handles connection pooling internally
+
+## Neo4j Schema
+
+### Node Types
+
+**PI Nodes** (Processed Items in the hierarchy):
+```cypher
+(:PI {
+  id: string,          // ULID identifier
+  created_at: datetime,
+  indexed_at: datetime
+})
+```
+
+**Entity Nodes**:
+```cypher
+(:Entity {
+  canonical_id: string,         // UUID (primary identifier)
+  code: string,                 // Human-readable code
+  label: string,                // Display name
+  type: string,                 // Entity type (person, event, date, file, etc.)
+  properties: string,           // JSON-serialized map
+  first_seen: datetime,
+  last_updated: datetime
+})
+```
+
+**Entity Subtypes** (applied as additional labels):
+- `(:Entity:Date)` - Date entities
+- `(:Entity:File)` - File entities
+
+### Relationship Types
+
+**PI Hierarchy**:
+```cypher
+(:PI)-[:PARENT_OF]->(:PI)
+(:PI)-[:CHILD_OF]->(:PI)
+```
+
+**Entity Extraction**:
+```cypher
+(:Entity)-[:EXTRACTED_FROM {
+  original_code: string,
+  extracted_at: datetime
+}]->(:PI)
+```
+
+**Entity Relationships**:
+```cypher
+(:Entity)-[:RELATIONSHIP {
+  predicate: string,            // Relationship type (e.g., "affiliated_with")
+  properties: string,           // JSON-serialized map
+  source_pi: string,            // PI that created this relationship
+  created_at: datetime
+}]->(:Entity)
+```
+
+### Important Conventions
+
+**Placeholder Entities**:
+- `type: "unknown"` indicates an unresolved placeholder entity
+- Empty `properties: "{}"` for placeholders without data
+- Placeholders are created during entity linking when a referenced entity hasn't been fully resolved yet
+
+**Properties Storage**:
+- All `properties` fields are JSON strings, not native Neo4j maps
+- Always use `JSON.stringify()` when writing, `JSON.parse()` when reading
+- Example: `properties: JSON.stringify({ role: "researcher" })`
+
+## API Endpoint Patterns
+
+### Request Flow
+
+1. **CORS handling**: All OPTIONS requests return CORS headers
+2. **Body parsing**: Parse JSON body, return 400 if invalid
+3. **Validation**: Check required fields, return 400 with VALIDATION_ERROR
+4. **Query execution**: Call `executeQuery()` with Cypher and parameters
+5. **Response**: Return JSON with appropriate status code
+
+### Error Response Format
+
+All errors return this structure:
+```typescript
+{
+  error: string,      // Human-readable message
+  code?: string,      // Error code (VALIDATION_ERROR, etc.)
+  details?: any       // Additional context
+}
+```
+
+### Cypher Query Patterns
+
+**MERGE for idempotency** (create or update):
+```cypher
+MERGE (p:PI {id: $pi})
+ON CREATE SET p.created_at = datetime()
+ON MATCH SET p.indexed_at = datetime()
+```
+
+**UNWIND for batch operations**:
+```cypher
+UNWIND $relationships AS rel
+MATCH (subject:Entity {canonical_id: rel.subject_id})
+MATCH (object:Entity {canonical_id: rel.object_id})
+CREATE (subject)-[:RELATIONSHIP {...}]->(object)
+```
+
+**Deduplication with COLLECT**:
+```cypher
+MATCH (pi:PI)<-[:EXTRACTED_FROM]-(e:Entity)
+WHERE pi.id IN $pis
+WITH e, collect(DISTINCT pi.id) AS source_pis
+RETURN DISTINCT e.canonical_id, ..., source_pis
+```
+
+## Entity Linking Architecture
+
+### Division of Responsibilities
+
+**Orchestrator** (external service calling this API):
+- Decides whether to merge, create, or enrich entities
+- Semantic similarity scoring (via Pinecone)
+- Resolves ALL entity references from properties
+- Generates canonical IDs (UUIDs)
+- Workflow orchestration
+
+**GraphDB Gateway** (this service):
+- Simple storage and retrieval of entities
+- Execute property merging with conflict resolution
+- Track source PIs via EXTRACTED_FROM relationships
+- Query parent/child entity hierarchies
+- Database constraints and validation
+
+**Key Principle**: The orchestrator handles all decision-making logic; the Graph API is a data layer.
+
+### Entity Reference Resolution
+
+Entity references can appear in properties:
+```json
+{
+  "properties": {
+    "when": {"type": "entity_ref", "code": "date_1864"}
+  }
+}
+```
+
+**Important**: The orchestrator resolves these references BEFORE calling `/entity/create`:
+1. Orchestrator extracts entity refs from properties
+2. Resolves each reference to a canonical_id
+3. Removes entity refs from properties (creates "clean" properties)
+4. Calls `/entity/create` with clean properties
+5. Calls `/relationships/create` separately for the resolved references
+
+**The Graph API does NOT auto-resolve entity references** - it only stores what it receives.
+
+## API Endpoints
+
+### PI Operations
+
+**POST /pi/create** - Create PI node with parent-child relationships
+- Creates or updates a PI node
+- Optionally links to parent and/or children PIs
+- Idempotent (uses MERGE)
+
+### Entity Operations
+
+**POST /entity/create** - Create new entity
+- Simple storage (does NOT resolve entity refs)
+- Accepts clean properties only
+- Creates EXTRACTED_FROM relationship to source PI
+
+**POST /entity/merge** - Merge entity with existing entity
+- Supports 4 merge strategies:
+  - `enrich_placeholder`: Upgrade placeholder (type="unknown") to rich entity
+  - `merge_peers`: Merge two rich entities with conflict resolution (accumulates values into arrays)
+  - `link_only`: Just add source PI relationship, no data changes
+  - `prefer_new`: Overwrite existing data with new data
+- Returns conflict information when merging peers
+
+**POST /entity/query** - Query entity by code
+- Returns entity details and all relationships
+- Includes both incoming and outgoing relationships
+
+**POST /entities/list** - List entities from specific PI(s)
+- Supports single PI or multiple PIs
+- Optional type filtering
+- Deduplicates entities by canonical_id
+
+### Hierarchy Operations
+
+**POST /entity/find-in-hierarchy** - Find entity in parent/child hierarchy
+- Search in parents, children, or both
+- Returns first match found
+- Includes placeholder detection (`is_placeholder` flag)
+- Used by orchestrator for entity resolution
+
+**POST /entities/hierarchy** - Bulk fetch entities from hierarchy
+- Get all entities from ancestors, descendants, or both
+- Optional type exclusion (e.g., exclude "file" entities)
+- Optional placeholder filtering
+- Deduplicates by canonical_id
+- Returns counts (from_parents, from_children)
+- Used by orchestrator in SETUP phase for caching
+
+### Relationship Operations
+
+**POST /relationships/create** - Batch create relationships
+- Creates multiple relationships in one request
+- Uses UNWIND for efficient batch processing
+
+### Merge Strategies Explained
+
+#### enrich_placeholder
+**When to use**: Upgrading a placeholder to a rich entity
+
+```typescript
+// Before: { type: "unknown", properties: {} }
+// After:  { type: "person", properties: { role: "researcher" } }
+```
+
+**Behavior**:
+- Validates entity is a placeholder (type === "unknown")
+- Updates type to new type
+- Replaces empty properties with new properties
+- Adds source PI relationship
+
+#### merge_peers
+**When to use**: Merging two entities that both have real data
+
+```typescript
+// Existing: { properties: { role: "president" } }
+// New:      { properties: { role: "general", location: "Virginia" } }
+// Result:   { properties: { role: ["president", "general"], location: "Virginia" } }
+```
+
+**Behavior**:
+- For conflicting properties: accumulate into array
+- For new properties: add them
+- Returns conflict details in response
+- Adds source PI relationship
+
+#### link_only
+**When to use**: Just linking a PI to existing entity
+
+**Behavior**:
+- NO data changes (type, label, properties unchanged)
+- Only adds EXTRACTED_FROM relationship
+- Updates timestamp
+
+#### prefer_new
+**When to use**: Overwriting existing data (rarely used)
+
+**Behavior**:
+- Replaces properties with new ones
+- Updates type/label if provided
+- Adds source PI relationship
+
+### Performance Optimizations
+
+**Database Indexes** (added via `npm run add-indexes`):
+- `entity_code_idx`: Index on Entity.code for fast hierarchy lookups
+- `entity_type_code_idx`: Composite index on (Entity.type, Entity.code) for filtered queries
+
+These indexes significantly improve performance for:
+- `/entity/find-in-hierarchy` (code lookups)
+- `/entities/hierarchy` (filtered queries)
+- Entity resolution during orchestration
+
+**Caching Strategy**:
+- Orchestrator caches parent/child entity indexes in SETUP phase
+- Uses `/entities/hierarchy` to bulk fetch entities once
+- Avoids redundant API calls during RESOLVING phase
+
+## Testing Strategy
+
+**Test hierarchy**:
+1. Neo4j connectivity (`npm test`)
+2. Local endpoint tests (`npm run test:endpoints` - requires `npm run dev` in another terminal)
+3. Production tests (`npm run test:production`)
+
+**Sample data**:
+- Use `npm run populate` to add test data
+- Use `npm run explore` to view current data
+- Use `npm run cleanup` to remove test data
+
+## Debugging Tips
+
+**Viewing logs**:
+```bash
+npm run logs          # Tail production logs
+wrangler tail --format pretty
+```
+
+**Common issues**:
+- **Driver not closed**: Always use try/finally in executeQuery
+- **Properties not JSON**: All properties fields must be JSON.stringify'd
+- **CORS errors**: Ensure all responses include CORS_HEADERS
+- **Cypher syntax**: Test queries in Neo4j Browser first
+
+## Deployment
+
+**Prerequisites**:
+- Cloudflare account with Wrangler CLI configured
+- Neo4j AuraDB instance running
+- Secrets configured via `wrangler secret put`
+
+**Deployment process**:
+```bash
+# Build TypeScript
+npx tsc
+
+# Deploy to Cloudflare
+npm run deploy
+```
+
+**Custom domain**: Configured in wrangler.jsonc routes section (graphdb-gateway.arke.institute)
+
+## Performance Characteristics
+
+- Cold start: ~26ms
+- Bundle size: 1.4 MB (186 KB gzipped)
+- Max timeout: 30 seconds (configurable in wrangler.jsonc)
+- Connection pool: 50 concurrent connections
+- Edge locations: Cloudflare global network (300+ cities)
+
+## Security Notes
+
+- TLS/HTTPS encryption on all connections
+- Secrets stored in Cloudflare (never in code)
+- Neo4j connection uses neo4j+s:// (TLS)
+- CORS currently set to `*` - should be restricted for production
+- No authentication layer - should be added for production use

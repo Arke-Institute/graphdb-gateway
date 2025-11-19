@@ -15,11 +15,13 @@ Worker Name: graphdb-gateway
 
 ## Features
 
-- 🚀 **Edge-deployed** - Runs on Cloudflare's global network
+- 🚀 **Edge-deployed** - Runs on Cloudflare's global network (300+ cities)
 - 🔒 **Secure** - TLS encryption, credential management via Cloudflare Secrets
-- ⚡ **Fast** - 26ms cold start, connection pooling, optimized queries
+- ⚡ **Fast** - 26ms cold start, connection pooling, database indexes
 - 📊 **Graph Operations** - PI hierarchy, entity management, relationship creation
-- 🎯 **Type-safe** - Full TypeScript implementation with comprehensive types
+- 🔍 **Hierarchy Queries** - Parent/child entity traversal with caching support
+- 🔄 **Smart Merging** - 4 merge strategies including conflict resolution
+- 🎯 **Type-safe** - Full TypeScript implementation with modular architecture
 - 🧪 **Well-tested** - Complete test suite with sample data
 
 ## Quick Start
@@ -47,7 +49,9 @@ See [docs/SETUP.md](docs/SETUP.md) for detailed setup instructions.
 GET /health
 ```
 
-### Create PI Node
+### PI Operations
+
+#### Create PI Node
 ```http
 POST /pi/create
 Content-Type: application/json
@@ -59,47 +63,9 @@ Content-Type: application/json
 }
 ```
 
-### Query Child Entities
-```http
-POST /entities/query_children
-Content-Type: application/json
+### Entity Operations
 
-{
-  "pi": "01KA1H53CP...",
-  "label": "Dr Gillingham",
-  "type": "person"
-}
-```
-
-### List Entities
-```http
-POST /entities/list
-Content-Type: application/json
-
-{
-  "pi": "01PAPER_001",       // Single PI
-  // OR
-  "pis": ["01PAPER_001", "01PAPER_002"],  // Multiple PIs
-  "type": "person"            // Optional: filter by type
-}
-
-// Returns deduplicated entities with source_pis array
-{
-  "entities": [
-    {
-      "canonical_id": "uuid_123",
-      "code": "dr_chen",
-      "label": "Dr. Chen",
-      "type": "person",
-      "properties": {...},
-      "source_pis": ["01PAPER_001", "01PAPER_002"]
-    }
-  ],
-  "total_count": 1
-}
-```
-
-### Create Entity
+#### Create Entity
 ```http
 POST /entity/create
 Content-Type: application/json
@@ -114,19 +80,120 @@ Content-Type: application/json
 }
 ```
 
-### Merge Entity
+#### Merge Entity (Enhanced with Strategies)
 ```http
 POST /entity/merge
 Content-Type: application/json
 
 {
   "canonical_id": "uuid_123",
-  "new_properties": {"updated": "data"},
+  "enrichment_data": {
+    "type": "person",              // Optional: upgrade placeholder type
+    "label": "Updated Label",      // Optional: refine label
+    "new_properties": {"role": "researcher"},
+    "merge_strategy": "merge_peers"  // enrich_placeholder | merge_peers | link_only | prefer_new
+  },
   "source_pi": "01KA1H5VGR..."
+}
+
+// Response includes conflicts for merge_peers strategy
+{
+  "canonical_id": "uuid_123",
+  "updated": true,
+  "conflicts": [
+    {
+      "property": "role",
+      "existing_value": "president",
+      "new_value": "general",
+      "resolution": "accumulated"  // Now: ["president", "general"]
+    }
+  ]
 }
 ```
 
-### Create Relationships
+**Merge Strategies:**
+- `enrich_placeholder`: Upgrade placeholder (type="unknown") to rich entity
+- `merge_peers`: Merge two rich entities with conflict resolution (accumulates into arrays)
+- `link_only`: Just add source PI relationship, no data changes
+- `prefer_new`: Overwrite existing data with new data
+
+#### Query Entity
+```http
+POST /entity/query
+Content-Type: application/json
+
+{
+  "code": "dr_gillingham"
+}
+```
+
+#### List Entities
+```http
+POST /entities/list
+Content-Type: application/json
+
+{
+  "pi": "01PAPER_001",       // Single PI
+  // OR
+  "pis": ["01PAPER_001", "01PAPER_002"],  // Multiple PIs
+  "type": "person"            // Optional: filter by type
+}
+```
+
+### Hierarchy Operations (NEW)
+
+#### Find Entity in Hierarchy
+```http
+POST /entity/find-in-hierarchy
+Content-Type: application/json
+
+{
+  "pi": "01KA1H53CP...",
+  "code": "george_washington",
+  "search_scope": "both",          // parents | children | both
+  "include_placeholder": true      // Optional: include type="unknown"
+}
+
+// Response
+{
+  "found": true,
+  "entity": {
+    "canonical_id": "uuid_123",
+    "code": "george_washington",
+    "label": "George Washington",
+    "type": "person",
+    "properties": {"role": "president"},
+    "source_pis": ["01KA1H63MP..."],
+    "is_placeholder": false
+  },
+  "found_in": "parent"  // parent | child
+}
+```
+
+#### Get Entities from Hierarchy (Bulk)
+```http
+POST /entities/hierarchy
+Content-Type: application/json
+
+{
+  "pi": "01KA1H53CP...",
+  "direction": "both",              // ancestors | descendants | both
+  "exclude_type": ["file"],         // Optional: exclude types
+  "include_placeholders": true      // Optional: include type="unknown"
+}
+
+// Response
+{
+  "entities": [...],
+  "total_count": 45,
+  "from_parents": 20,
+  "from_children": 25
+}
+```
+
+### Relationship Operations
+
+#### Create Relationships
 ```http
 POST /relationships/create
 Content-Type: application/json
@@ -147,12 +214,30 @@ Content-Type: application/json
 ## Architecture
 
 ```
-Orchestrator
+Orchestrator (entity linking pipeline)
      ↓
-[GraphDB Gateway Worker]
+[GraphDB Gateway Worker] (Cloudflare edge)
      ↓ (neo4j+s://)
-Neo4j AuraDB
+Neo4j AuraDB (graph database)
 ```
+
+### Division of Responsibilities
+
+**Orchestrator** (external service calling this API):
+- ✅ Decides whether to merge, create, or enrich entities
+- ✅ Semantic similarity scoring (via Pinecone)
+- ✅ Resolves ALL entity references from properties
+- ✅ Generates canonical IDs (UUIDs)
+- ✅ Workflow orchestration
+
+**GraphDB Gateway** (this service):
+- ✅ Simple storage and retrieval of entities
+- ✅ Execute property merging with conflict resolution
+- ✅ Track source PIs via EXTRACTED_FROM relationships
+- ✅ Query parent/child entity hierarchies
+- ✅ Database constraints and validation
+
+**Key Principle**: The orchestrator handles all decision-making logic; the Graph API is a data layer.
 
 ### Technology Stack
 
@@ -163,30 +248,60 @@ Neo4j AuraDB
 - **Build:** TypeScript compiler
 - **Deploy:** Wrangler CLI
 
+### Code Architecture
+
+The codebase follows a modular, domain-driven design:
+- **Handlers**: Domain-specific request handlers (PI, Entity, Hierarchy, Relationship)
+- **Types**: Organized type definitions per domain
+- **Utils**: Shared utilities for responses and validation
+- **Router**: Clean route table with automatic dispatch
+- **Constants**: Centralized configuration and error codes
+
+Benefits: Easier testing, better maintainability, clear separation of concerns.
+
 ## Project Structure
 
 ```
 graphdb-gateway/
 ├── src/
-│   ├── index.ts          # Main worker & API handlers
-│   ├── neo4j.ts          # Neo4j connection module
-│   └── types.ts          # TypeScript type definitions
+│   ├── index.ts              # Entry point (minimal)
+│   ├── router.ts             # Route matching & dispatch
+│   ├── constants.ts          # Configuration & error codes
+│   ├── neo4j.ts              # Neo4j connection module
+│   ├── handlers/             # Domain-specific handlers
+│   │   ├── pi.ts            # PI operations
+│   │   ├── entity.ts        # Entity CRUD operations
+│   │   ├── hierarchy.ts     # Hierarchy traversal (NEW)
+│   │   └── relationship.ts  # Relationship operations
+│   ├── types/                # TypeScript type definitions
+│   │   ├── index.ts         # Re-exports
+│   │   ├── common.ts        # Shared types
+│   │   ├── pi.ts            # PI types
+│   │   ├── entity.ts        # Entity types
+│   │   ├── hierarchy.ts     # Hierarchy types (NEW)
+│   │   └── relationship.ts  # Relationship types
+│   └── utils/                # Shared utilities
+│       ├── response.ts      # Response helpers
+│       └── validation.ts    # Input validation
 ├── tests/
-│   ├── test-neo4j.js     # Neo4j connectivity tests
-│   ├── test-endpoints.sh # Local API tests
-│   ├── test-production.sh# Production API tests
-│   └── explore-data.js   # Database exploration
+│   ├── test-neo4j.js        # Neo4j connectivity tests
+│   ├── test-endpoints.sh    # Local API tests
+│   ├── test-production.sh   # Production API tests
+│   └── explore-data.js      # Database exploration
 ├── scripts/
 │   ├── populate-sample-data.js  # Sample data generator
-│   └── cleanup-test-data.js     # Test data cleanup
+│   ├── cleanup-test-data.js     # Test data cleanup
+│   └── add-indexes.js           # Database index setup (NEW)
 ├── docs/
-│   ├── SETUP.md          # Setup & deployment guide
-│   ├── QUICK_START.md    # Quick reference
-│   ├── DEPLOYMENT.md     # Production deployment info
+│   ├── SETUP.md             # Setup & deployment guide
+│   ├── QUICK_START.md       # Quick reference
+│   ├── DEPLOYMENT.md        # Production deployment info
 │   └── neo4j_documentation.md
-├── wrangler.jsonc        # Cloudflare Worker config
-├── tsconfig.json         # TypeScript config
-└── package.json          # Project dependencies
+├── GRAPH_API_REQUIREMENTS.md # API specification (NEW)
+├── CLAUDE.md                 # AI assistant guidance
+├── wrangler.jsonc            # Cloudflare Worker config
+├── tsconfig.json             # TypeScript config
+└── package.json              # Project dependencies
 ```
 
 ## Neo4j Schema
@@ -208,17 +323,21 @@ graphdb-gateway/
 ### Available Commands
 
 ```bash
+# Development
 npm run dev              # Start local development server
 npm run deploy           # Deploy to Cloudflare
 npm run logs             # View production logs
 
+# Testing
 npm test                 # Test Neo4j connectivity
 npm run test:endpoints   # Test API endpoints (local)
 npm run test:production  # Test production deployment
 
+# Database utilities
 npm run populate         # Add sample data to Neo4j
 npm run explore          # View database contents
 npm run cleanup          # Remove test data
+npm run add-indexes      # Add performance indexes (NEW)
 ```
 
 ### Environment Variables
@@ -276,6 +395,17 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment information
 - **Max Timeout:** 30 seconds
 - **Connection Pool:** 50 concurrent connections
 - **Edge Locations:** Cloudflare global network (300+ cities)
+
+### Database Indexes
+
+Performance-optimized indexes (created via `npm run add-indexes`):
+- `entity_code_idx`: Index on Entity.code for fast hierarchy lookups
+- `entity_type_code_idx`: Composite index on (Entity.type, Entity.code) for filtered queries
+
+These indexes significantly improve:
+- Entity hierarchy traversal performance
+- Entity resolution during orchestration
+- Filtered entity queries
 
 ## Security
 
