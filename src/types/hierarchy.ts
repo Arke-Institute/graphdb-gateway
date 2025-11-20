@@ -23,6 +23,7 @@ export interface FindInHierarchyResponse {
     label: string;
     type: string;
     properties: Record<string, any>;
+    created_by_pi: string;          // PI that created the canonical entity (immutable)
     source_pis: string[];           // All PIs that extracted this entity
     is_placeholder: boolean;        // Computed: type === "unknown" && properties empty
   };
@@ -48,8 +49,9 @@ export interface HierarchyEntity {
   label: string;
   type: string;
   properties: Record<string, any>;
-  source_pi: string;                // PRIMARY source PI (first to extract)
-  all_source_pis: string[];         // All PIs that extracted this
+  created_by_pi: string;            // PI that created the canonical entity (immutable)
+  source_pi: string;                // PI from which this entity was extracted (in this hierarchy query)
+  all_source_pis: string[];         // All PIs that extracted this entity
   is_placeholder: boolean;
 }
 

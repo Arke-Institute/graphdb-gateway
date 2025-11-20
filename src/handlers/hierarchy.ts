@@ -60,6 +60,7 @@ export async function handleFindInHierarchy(
                entity.label AS label,
                entity.type AS type,
                entity.properties AS properties,
+               entity.created_by_pi AS created_by_pi,
                source_pis
         LIMIT 1
       `;
@@ -81,6 +82,7 @@ export async function handleFindInHierarchy(
           label: record.get('label'),
           type: record.get('type'),
           properties,
+          created_by_pi: record.get('created_by_pi'),
           source_pis: record.get('source_pis'),
           is_placeholder: isPlaceholder({
             type: record.get('type'),
@@ -111,6 +113,7 @@ export async function handleFindInHierarchy(
                entity.label AS label,
                entity.type AS type,
                entity.properties AS properties,
+               entity.created_by_pi AS created_by_pi,
                source_pis
         LIMIT 1
       `;
@@ -132,6 +135,7 @@ export async function handleFindInHierarchy(
           label: record.get('label'),
           type: record.get('type'),
           properties,
+          created_by_pi: record.get('created_by_pi'),
           source_pis: record.get('source_pis'),
           is_placeholder: isPlaceholder({
             type: record.get('type'),
@@ -229,6 +233,7 @@ export async function handleGetEntitiesHierarchy(
           entity.label AS label,
           entity.type AS type,
           entity.properties AS properties,
+          entity.created_by_pi AS created_by_pi,
           ancestor.id AS source_pi,
           all_source_pis
       `;
@@ -253,6 +258,7 @@ export async function handleGetEntitiesHierarchy(
           label: record.get('label'),
           type: record.get('type'),
           properties,
+          created_by_pi: record.get('created_by_pi'),
           source_pi: record.get('source_pi'),
           all_source_pis: record.get('all_source_pis'),
           is_placeholder: isPlaceholder({
@@ -279,6 +285,7 @@ export async function handleGetEntitiesHierarchy(
           entity.label AS label,
           entity.type AS type,
           entity.properties AS properties,
+          entity.created_by_pi AS created_by_pi,
           descendant.id AS source_pi,
           all_source_pis
       `;
@@ -303,6 +310,7 @@ export async function handleGetEntitiesHierarchy(
           label: record.get('label'),
           type: record.get('type'),
           properties,
+          created_by_pi: record.get('created_by_pi'),
           source_pi: record.get('source_pi'),
           all_source_pis: record.get('all_source_pis'),
           is_placeholder: isPlaceholder({

@@ -410,7 +410,10 @@ graphdb-gateway/
 
 ### Node Types
 - `(:PI {id, created_at, indexed_at})`
-- `(:Entity {canonical_id, code, label, type, properties, first_seen, last_updated})`
+- `(:Entity {canonical_id, code, label, type, properties, created_by_pi, first_seen, last_updated})`
+  - `created_by_pi`: Immutable field tracking which PI first created this entity
+  - Provides O(1) lookup of entity creator (faster than relationship traversal)
+  - Preserved across all merge operations
 - `(:Entity:Date)` - Date entities
 - `(:Entity:File)` - File entities
 
@@ -418,6 +421,8 @@ graphdb-gateway/
 - `(:PI)-[:PARENT_OF]->(:PI)`
 - `(:PI)-[:CHILD_OF]->(:PI)`
 - `(:Entity)-[:EXTRACTED_FROM {original_code, extracted_at}]->(:PI)`
+  - Tracks all PIs that extracted/mentioned this entity
+  - Different from `created_by_pi` (which only tracks the creator)
 - `(:Entity)-[:RELATIONSHIP {predicate, properties, source_pi}]->(:Entity)`
 
 ## Development

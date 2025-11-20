@@ -92,6 +92,7 @@ export interface QueryEntityResponse {
     label: string;
     type: string;
     properties: Record<string, any>;
+    created_by_pi: string;
     source_pis: string[];
   };
   relationships?: EntityRelationship[];
@@ -115,6 +116,7 @@ export interface EntityWithSource {
   label: string;
   type: string;
   properties: Record<string, any>;
+  created_by_pi: string;   // PI that created the canonical entity (immutable)
   source_pis: string[];    // Array of source PIs (deduplicated)
 }
 

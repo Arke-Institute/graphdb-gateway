@@ -79,6 +79,7 @@ export async function handleCreateEntity(
         label: $label,
         type: $type,
         properties: $properties,
+        created_by_pi: $source_pi,
         first_seen: datetime(),
         last_updated: datetime()
       })
@@ -208,6 +209,7 @@ async function handleEnrichPlaceholder(
         e.label = COALESCE($new_label, e.label),
         e.properties = $new_properties,
         e.last_updated = datetime()
+        // NOTE: created_by_pi is NOT modified (preserved from original placeholder creator)
     MERGE (pi:PI {id: $source_pi})
     MERGE (e)-[:EXTRACTED_FROM {
       original_code: e.code,
@@ -307,6 +309,7 @@ async function handleMergePeers(
     MATCH (e:Entity {canonical_id: $canonical_id})
     SET e.properties = $merged_properties,
         e.last_updated = datetime()
+        // NOTE: created_by_pi is NOT modified (preserved from first creator)
     MERGE (pi:PI {id: $source_pi})
     MERGE (e)-[:EXTRACTED_FROM {
       original_code: e.code,
@@ -347,6 +350,7 @@ async function handleLinkOnly(
       extracted_at: datetime()
     }]->(pi)
     SET e.last_updated = datetime()
+        // NOTE: created_by_pi is NOT modified (link_only = no data changes)
     RETURN e
   `;
 
@@ -387,6 +391,7 @@ async function handlePreferNew(
         e.label = COALESCE($new_label, e.label),
         e.properties = $new_properties,
         e.last_updated = datetime()
+        // NOTE: created_by_pi is NOT modified (creator is lifecycle metadata, not entity data)
     MERGE (pi:PI {id: $source_pi})
     MERGE (e)-[:EXTRACTED_FROM {
       original_code: e.code,
@@ -473,6 +478,7 @@ export async function handleQueryEntity(
              e.label AS label,
              e.type AS type,
              e.properties AS properties,
+             e.created_by_pi AS created_by_pi,
              source_pis,
              outgoing_rels + incoming_rels AS relationships
     `;
@@ -510,6 +516,7 @@ export async function handleQueryEntity(
         properties: record.get('properties')
           ? JSON.parse(record.get('properties'))
           : {},
+        created_by_pi: record.get('created_by_pi'),
         source_pis: record.get('source_pis'),
       },
       relationships,
@@ -562,6 +569,7 @@ export async function handleListEntities(
         e.label AS label,
         e.type AS type,
         e.properties AS properties,
+        e.created_by_pi AS created_by_pi,
         source_pis
       ORDER BY e.type, e.label
     `;
@@ -579,6 +587,7 @@ export async function handleListEntities(
       properties: record.get('properties')
         ? JSON.parse(record.get('properties'))
         : {},
+      created_by_pi: record.get('created_by_pi'),
       source_pis: record.get('source_pis'),
     }));
 

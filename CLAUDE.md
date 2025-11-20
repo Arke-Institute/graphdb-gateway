@@ -157,6 +157,7 @@ export async function executeQuery(env, query, params) {
   label: string,                // Display name
   type: string,                 // Entity type (person, event, date, file, etc.)
   properties: string,           // JSON-serialized map
+  created_by_pi: string,        // PI that created this entity (immutable)
   first_seen: datetime,
   last_updated: datetime
 })
@@ -203,6 +204,23 @@ export async function executeQuery(env, query, params) {
 - All `properties` fields are JSON strings, not native Neo4j maps
 - Always use `JSON.stringify()` when writing, `JSON.parse()` when reading
 - Example: `properties: JSON.stringify({ role: "researcher" })`
+
+**Entity Creator Tracking (`created_by_pi`)**:
+- `created_by_pi` tracks which PI first created the canonical entity record
+- Set once during `/entity/create`, never modified by any merge operation
+- **Immutable** across all merge strategies (enrich_placeholder, merge_peers, link_only, prefer_new)
+- Different from `source_pis` (via EXTRACTED_FROM relationships), which tracks all PIs that mention this entity
+- Provides O(1) lookup of entity creator (faster than relationship traversal)
+- Use cases:
+  - Auditing: "which pipeline run created this entity?"
+  - Debugging: trace entity lifecycle back to origin
+  - Future: permissions, quotas, conflict resolution based on creator
+
+**Semantics**:
+- Creator = "who created the canonical entity record" (even if it was a placeholder)
+- When enriching a placeholder, `created_by_pi` remains the placeholder creator
+- When merging peers, `created_by_pi` remains the first entity's creator
+- EXTRACTED_FROM relationships track the full contribution history
 
 ## API Endpoint Patterns
 
