@@ -211,10 +211,10 @@ async function handleEnrichPlaceholder(
         e.last_updated = datetime()
         // NOTE: created_by_pi is NOT modified (preserved from original placeholder creator)
     MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[:EXTRACTED_FROM {
-      original_code: e.code,
-      extracted_at: datetime()
-    }]->(pi)
+    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+    ON CREATE SET
+      rel.original_code = e.code,
+      rel.extracted_at = datetime()
     RETURN e
   `;
 
@@ -311,10 +311,10 @@ async function handleMergePeers(
         e.last_updated = datetime()
         // NOTE: created_by_pi is NOT modified (preserved from first creator)
     MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[:EXTRACTED_FROM {
-      original_code: e.code,
-      extracted_at: datetime()
-    }]->(pi)
+    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+    ON CREATE SET
+      rel.original_code = e.code,
+      rel.extracted_at = datetime()
     RETURN e
   `;
 
@@ -345,10 +345,10 @@ async function handleLinkOnly(
   const query = `
     MATCH (e:Entity {canonical_id: $canonical_id})
     MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[:EXTRACTED_FROM {
-      original_code: e.code,
-      extracted_at: datetime()
-    }]->(pi)
+    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+    ON CREATE SET
+      rel.original_code = e.code,
+      rel.extracted_at = datetime()
     SET e.last_updated = datetime()
         // NOTE: created_by_pi is NOT modified (link_only = no data changes)
     RETURN e
@@ -393,10 +393,10 @@ async function handlePreferNew(
         e.last_updated = datetime()
         // NOTE: created_by_pi is NOT modified (creator is lifecycle metadata, not entity data)
     MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[:EXTRACTED_FROM {
-      original_code: e.code,
-      extracted_at: datetime()
-    }]->(pi)
+    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+    ON CREATE SET
+      rel.original_code = e.code,
+      rel.extracted_at = datetime()
     RETURN e
   `;
 
