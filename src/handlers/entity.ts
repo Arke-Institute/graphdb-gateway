@@ -19,6 +19,12 @@ import {
   ListEntitiesResponse,
   EntityWithSource,
   SuccessResponse,
+  DeleteEntityResponse,
+  GetEntityResponse,
+  LookupByCodeRequest,
+  LookupByCodeResponse,
+  LookupByLabelRequest,
+  LookupByLabelResponse,
 } from '../types';
 
 /**
@@ -43,26 +49,6 @@ export async function handleCreateEntity(
       );
     }
 
-    // Check if entity already exists
-    const checkQuery = `
-      MATCH (e:Entity {canonical_id: $canonical_id})
-      RETURN e.canonical_id as canonical_id, e.code as code
-    `;
-
-    const { records: existingRecords } = await executeQuery(env, checkQuery, { canonical_id });
-
-    if (existingRecords.length > 0) {
-      return errorResponse(
-        `Entity with canonical_id ${canonical_id} already exists. Use /entity/merge to update it.`,
-        ERROR_CODES.ENTITY_ALREADY_EXISTS,
-        {
-          canonical_id,
-          existing_code: existingRecords[0].get('code')
-        },
-        409
-      );
-    }
-
     // Determine if entity should have a subtype label
     let entityLabel = 'Entity';
     if (type === 'date') {
@@ -71,23 +57,28 @@ export async function handleCreateEntity(
       entityLabel = 'Entity:File';
     }
 
+    // Use MERGE on canonical_id to make this atomic and idempotent
+    // The unique constraint on canonical_id ensures no duplicates under concurrency
     const query = `
       MATCH (pi:PI {id: $source_pi})
-      CREATE (e:${entityLabel} {
-        canonical_id: $canonical_id,
-        code: $code,
-        label: $label,
-        type: $type,
-        properties: $properties,
-        created_by_pi: $source_pi,
-        first_seen: datetime(),
-        last_updated: datetime()
-      })
-      CREATE (e)-[:EXTRACTED_FROM {
-        original_code: $code,
-        extracted_at: datetime()
-      }]->(pi)
-      RETURN e
+      MERGE (e:${entityLabel} {canonical_id: $canonical_id})
+      ON CREATE SET
+        e.code = $code,
+        e.label = $label,
+        e.type = $type,
+        e.properties = $properties,
+        e.created_by_pi = $source_pi,
+        e.first_seen = datetime(),
+        e.last_updated = datetime()
+      ON MATCH SET
+        e.last_updated = datetime()
+      WITH e, pi
+      MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+      ON CREATE SET
+        rel.original_code = $code,
+        rel.extracted_at = datetime()
+      RETURN e,
+             CASE WHEN e.first_seen = e.last_updated THEN true ELSE false END as was_created
     `;
 
     const { summary } = await executeQuery(env, query, {
@@ -128,7 +119,7 @@ export async function handleMergeEntity(
   body: MergeEntityRequest
 ): Promise<Response> {
   try {
-    const { canonical_id, enrichment_data, source_pi } = body;
+    const { canonical_id, enrichment_data, source_pi, absorb_duplicate_id } = body;
 
     if (!canonical_id || !source_pi) {
       return errorResponse(
@@ -139,6 +130,75 @@ export async function handleMergeEntity(
       );
     }
 
+    // If absorbing a duplicate entity, use APOC mergeNodes
+    if (absorb_duplicate_id) {
+      if (!enrichment_data) {
+        return errorResponse(
+          'enrichment_data required when absorbing duplicate',
+          ERROR_CODES.VALIDATION_ERROR,
+          null,
+          400
+        );
+      }
+
+      const { merge_strategy } = enrichment_data;
+
+      if (!merge_strategy || !isValidMergeStrategy(merge_strategy)) {
+        return errorResponse(
+          `Invalid merge_strategy. Must be one of: enrich_placeholder, merge_peers, link_only, prefer_new`,
+          ERROR_CODES.INVALID_MERGE_STRATEGY,
+          { provided: merge_strategy },
+          400
+        );
+      }
+
+      const query = `
+        MATCH (canonical:Entity {canonical_id: $canonical_id})
+        MATCH (duplicate:Entity {canonical_id: $absorb_duplicate_id})
+
+        // Use APOC to redirect all relationships from duplicate to canonical, then delete duplicate
+        CALL apoc.refactor.mergeNodes([canonical, duplicate], {
+          properties: 'discard',  // Keep canonical's properties unchanged
+          mergeRels: true          // Redirect ALL relationships from duplicate to canonical
+        })
+        YIELD node
+
+        // Add source PI relationship
+        MERGE (node)-[r:EXTRACTED_FROM]->(pi:PI {id: $source_pi})
+        ON CREATE SET r.extracted_at = datetime()
+
+        // Update timestamp
+        SET node.last_updated = datetime()
+
+        RETURN node.canonical_id as canonical_id
+      `;
+
+      const { records } = await executeQuery(env, query, {
+        canonical_id,
+        absorb_duplicate_id,
+        source_pi,
+        merge_strategy,
+      });
+
+      if (records.length === 0) {
+        return errorResponse(
+          'Entity not found',
+          ERROR_CODES.ENTITY_NOT_FOUND,
+          { canonical_id, absorb_duplicate_id },
+          404
+        );
+      }
+
+      const response: MergeEntityResponse = {
+        canonical_id,
+        updated: true,
+        absorbed_duplicate: absorb_duplicate_id,
+      };
+
+      return jsonResponse(response);
+    }
+
+    // Regular merge (no absorption) - continue with existing logic
     if (!enrichment_data) {
       return errorResponse(
         'Missing required field: enrichment_data',
@@ -600,6 +660,266 @@ export async function handleListEntities(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to list entities',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+/**
+ * DELETE /entity/:canonical_id
+ * Delete an entity and all its relationships (cascade delete)
+ */
+export async function handleDeleteEntity(
+  env: Env,
+  canonical_id: string
+): Promise<Response> {
+  try {
+    if (!canonical_id) {
+      return errorResponse(
+        'Missing required parameter: canonical_id',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    // Delete entity and all its relationships (DETACH DELETE)
+    const query = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+
+      // Count relationships before deletion
+      OPTIONAL MATCH (e)-[r]-()
+      WITH e, count(DISTINCT r) as rel_count
+
+      // Delete entity and all relationships
+      DETACH DELETE e
+
+      RETURN rel_count
+    `;
+
+    const { records } = await executeQuery(env, query, { canonical_id });
+
+    if (records.length === 0) {
+      return errorResponse(
+        'Entity not found',
+        ERROR_CODES.ENTITY_NOT_FOUND,
+        { canonical_id },
+        404
+      );
+    }
+
+    const relationshipCount = Number(records[0].get('rel_count') || 0);
+
+    const response: DeleteEntityResponse = {
+      success: true,
+      canonical_id,
+      deleted: true,
+      relationship_count: relationshipCount,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to delete entity',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * GET /entity/:canonical_id
+ * Get entity by canonical_id
+ */
+export async function handleGetEntity(
+  env: Env,
+  canonical_id: string
+): Promise<Response> {
+  try {
+    if (!canonical_id) {
+      return errorResponse(
+        'Missing required parameter: canonical_id',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    // Fetch entity and its source PIs
+    const query = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+      WITH e, collect(DISTINCT pi.id) as source_pis
+      RETURN e.canonical_id AS canonical_id,
+             e.code AS code,
+             e.label AS label,
+             e.type AS type,
+             e.properties AS properties,
+             e.created_by_pi AS created_by_pi,
+             source_pis
+    `;
+
+    const { records } = await executeQuery(env, query, { canonical_id });
+
+    if (records.length === 0) {
+      const response: GetEntityResponse = {
+        found: false,
+      };
+      return jsonResponse(response);
+    }
+
+    const record = records[0];
+    const response: GetEntityResponse = {
+      found: true,
+      entity: {
+        canonical_id: record.get('canonical_id'),
+        code: record.get('code'),
+        label: record.get('label'),
+        type: record.get('type'),
+        properties: record.get('properties')
+          ? JSON.parse(record.get('properties'))
+          : {},
+        created_by_pi: record.get('created_by_pi'),
+        source_pis: record.get('source_pis'),
+      },
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to get entity',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /entity/lookup/code
+ * Lookup entity by code
+ */
+export async function handleLookupByCode(
+  env: Env,
+  body: LookupByCodeRequest
+): Promise<Response> {
+  try {
+    const { code } = body;
+
+    if (!code) {
+      return errorResponse(
+        'Missing required field: code',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    const query = `
+      MATCH (e:Entity {code: $code})
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+      WITH e, collect(DISTINCT pi.id) as source_pis
+      RETURN e.canonical_id AS canonical_id,
+             e.code AS code,
+             e.label AS label,
+             e.type AS type,
+             e.properties AS properties,
+             e.created_by_pi AS created_by_pi,
+             source_pis
+    `;
+
+    const { records } = await executeQuery(env, query, { code });
+
+    if (records.length === 0) {
+      const response: LookupByCodeResponse = {
+        found: false,
+      };
+      return jsonResponse(response);
+    }
+
+    const record = records[0];
+    const response: LookupByCodeResponse = {
+      found: true,
+      entity: {
+        canonical_id: record.get('canonical_id'),
+        code: record.get('code'),
+        label: record.get('label'),
+        type: record.get('type'),
+        properties: record.get('properties')
+          ? JSON.parse(record.get('properties'))
+          : {},
+        created_by_pi: record.get('created_by_pi'),
+        source_pis: record.get('source_pis'),
+      },
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to lookup entity by code',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /entity/lookup/label
+ * Lookup entities by label and type (case-insensitive label match)
+ */
+export async function handleLookupByLabel(
+  env: Env,
+  body: LookupByLabelRequest
+): Promise<Response> {
+  try {
+    const { label, type } = body;
+
+    if (!label || !type) {
+      return errorResponse(
+        'Missing required fields: label, type',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    const query = `
+      MATCH (e:Entity)
+      WHERE toLower(e.label) = toLower($label) AND e.type = $type
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+      WITH e, collect(DISTINCT pi.id) as source_pis
+      RETURN e.canonical_id AS canonical_id,
+             e.code AS code,
+             e.label AS label,
+             e.type AS type,
+             e.properties AS properties,
+             e.created_by_pi AS created_by_pi,
+             source_pis
+      ORDER BY e.label
+    `;
+
+    const { records } = await executeQuery(env, query, { label, type });
+
+    const entities = records.map((record) => ({
+      canonical_id: record.get('canonical_id'),
+      code: record.get('code'),
+      label: record.get('label'),
+      type: record.get('type'),
+      properties: record.get('properties')
+        ? JSON.parse(record.get('properties'))
+        : {},
+      created_by_pi: record.get('created_by_pi'),
+      source_pis: record.get('source_pis'),
+    }));
+
+    const response: LookupByLabelResponse = {
+      found: entities.length > 0,
+      entities,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to lookup entity by label',
       error.code,
       { stack: error.stack }
     );

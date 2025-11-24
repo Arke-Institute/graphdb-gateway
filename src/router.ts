@@ -8,6 +8,10 @@ import {
   handleMergeEntity,
   handleQueryEntity,
   handleListEntities,
+  handleDeleteEntity,
+  handleGetEntity,
+  handleLookupByCode,
+  handleLookupByLabel,
 } from './handlers/entity';
 import {
   handleFindInHierarchy,
@@ -37,6 +41,8 @@ const routes: RouteTable = {
   'POST /entity/create': handleCreateEntity,
   'POST /entity/merge': handleMergeEntity,
   'POST /entity/query': handleQueryEntity,
+  'POST /entity/lookup/code': handleLookupByCode,
+  'POST /entity/lookup/label': handleLookupByLabel,
   'POST /entity/find-in-hierarchy': handleFindInHierarchy,
   'POST /entities/list': handleListEntities,
   'POST /entities/hierarchy': handleGetEntitiesHierarchy,
@@ -55,6 +61,10 @@ const ENDPOINTS = [
   'POST /entity/create',
   'POST /entity/merge',
   'POST /entity/query',
+  'POST /entity/lookup/code',
+  'POST /entity/lookup/label',
+  'GET /entity/:canonical_id',
+  'DELETE /entity/:canonical_id',
   'POST /entity/find-in-hierarchy',
   'POST /entities/list',
   'POST /entities/hierarchy',
@@ -96,6 +106,38 @@ export async function handleRequest(
   if (path === '/' || path === '/health') {
     if (request.method === 'GET') {
       return jsonResponse(getHealthResponse());
+    }
+  }
+
+  // Handle GET /entity/:canonical_id specially (URL parameter)
+  if (request.method === 'GET' && path.startsWith('/entity/')) {
+    const canonical_id = path.split('/entity/')[1];
+    if (canonical_id) {
+      try {
+        return await handleGetEntity(env, canonical_id);
+      } catch (error: any) {
+        return errorResponse(
+          'Internal server error',
+          ERROR_CODES.INTERNAL_ERROR,
+          { message: error.message, stack: error.stack }
+        );
+      }
+    }
+  }
+
+  // Handle DELETE /entity/:canonical_id specially (URL parameter)
+  if (request.method === 'DELETE' && path.startsWith('/entity/')) {
+    const canonical_id = path.split('/entity/')[1];
+    if (canonical_id) {
+      try {
+        return await handleDeleteEntity(env, canonical_id);
+      } catch (error: any) {
+        return errorResponse(
+          'Internal server error',
+          ERROR_CODES.INTERNAL_ERROR,
+          { message: error.message, stack: error.stack }
+        );
+      }
     }
   }
 
