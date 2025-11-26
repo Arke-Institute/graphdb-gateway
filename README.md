@@ -65,7 +65,7 @@ Content-Type: application/json
 
 ### Entity Operations
 
-#### Create Entity
+#### Create Entity (Idempotent)
 ```http
 POST /entity/create
 Content-Type: application/json
@@ -79,8 +79,10 @@ Content-Type: application/json
   "source_pi": "01KA1H53CP..."
 }
 
-// Returns 409 Conflict if entity already exists
-// Error directs to use /entity/merge instead
+// Idempotent: Uses MERGE on canonical_id
+// First call: Creates entity (ON CREATE)
+// Subsequent calls: Updates timestamp (ON MATCH)
+// All requests with same canonical_id succeed (no 409)
 ```
 
 #### Merge Entity (Enhanced with Strategies)
@@ -120,7 +122,106 @@ Content-Type: application/json
 - `link_only`: Just add source PI relationship, no data changes
 - `prefer_new`: Overwrite existing data with new data
 
-#### Query Entity
+#### Get Entity by ID
+```http
+GET /entity/:canonical_id
+
+// Response (found)
+{
+  "found": true,
+  "entity": {
+    "canonical_id": "uuid_123",
+    "code": "dr_gillingham",
+    "label": "Dr Gillingham",
+    "type": "person",
+    "properties": {"role": "researcher"},
+    "created_by_pi": "01KA1H53CP...",
+    "source_pis": ["01KA1H53CP...", "01KA1H63MP..."]
+  }
+}
+
+// Response (not found)
+{
+  "found": false
+}
+```
+
+#### Delete Entity (Cascade)
+```http
+DELETE /entity/:canonical_id
+
+// Response
+{
+  "success": true,
+  "canonical_id": "uuid_123",
+  "deleted": true,
+  "relationship_count": 5  // Relationships deleted
+}
+```
+
+#### Lookup Entity by Code
+```http
+POST /entity/lookup/code
+Content-Type: application/json
+
+{
+  "code": "nick_chimicles"
+}
+
+// Response (found)
+{
+  "found": true,
+  "entity": {
+    "canonical_id": "...",
+    "code": "nick_chimicles",
+    "label": "Nick Chimicles",
+    "type": "person",
+    "properties": {...},
+    "created_by_pi": "...",
+    "source_pis": ["pi1", "pi2"]
+  }
+}
+
+// Response (not found)
+{
+  "found": false
+}
+```
+
+#### Lookup Entities by Label and Type
+```http
+POST /entity/lookup/label
+Content-Type: application/json
+
+{
+  "label": "Nick Chimicles",
+  "type": "person"
+}
+
+// Response (can return multiple matches)
+{
+  "found": true,
+  "entities": [
+    {
+      "canonical_id": "...",
+      "code": "nick_chimicles",
+      "label": "Nick Chimicles",
+      "type": "person",
+      "properties": {...},
+      "created_by_pi": "...",
+      "source_pis": ["pi1", "pi2"]
+    }
+  ]
+}
+
+// Response (not found)
+{
+  "found": false,
+  "entities": []
+}
+```
+
+#### Query Entity (with Relationships)
 ```http
 POST /entity/query
 Content-Type: application/json
@@ -143,7 +244,7 @@ Content-Type: application/json
 }
 ```
 
-### Hierarchy Operations (NEW)
+### Hierarchy Operations
 
 #### Find Entity in Hierarchy
 ```http
@@ -195,6 +296,47 @@ Content-Type: application/json
 ```
 
 ### Relationship Operations
+
+#### Get Entity Relationships
+```http
+GET /relationships/:canonical_id
+
+// Response (found)
+{
+  "found": true,
+  "canonical_id": "uuid_123",
+  "relationships": [
+    {
+      "direction": "outgoing",
+      "predicate": "affiliated_with",
+      "target_id": "uuid_456",
+      "target_code": "org_123",
+      "target_label": "Organization Name",
+      "target_type": "organization",
+      "properties": {"since": "2020"},
+      "source_pi": "01KA1H53CP...",
+      "created_at": "2025-11-19T22:00:00Z"
+    },
+    {
+      "direction": "incoming",
+      "predicate": "works_for",
+      "target_id": "uuid_789",
+      "target_code": "person_456",
+      "target_label": "John Doe",
+      "target_type": "person",
+      "properties": {},
+      "source_pi": "01KA1H63MP...",
+      "created_at": "2025-11-20T10:00:00Z"
+    }
+  ],
+  "total_count": 2
+}
+
+// Response (not found)
+{
+  "found": false
+}
+```
 
 #### Create Relationships
 ```http
@@ -380,26 +522,27 @@ graphdb-gateway/
 │   │   ├── common.ts        # Shared types
 │   │   ├── pi.ts            # PI types
 │   │   ├── entity.ts        # Entity types
-│   │   ├── hierarchy.ts     # Hierarchy types (NEW)
+│   │   ├── hierarchy.ts     # Hierarchy types
 │   │   └── relationship.ts  # Relationship types
 │   └── utils/                # Shared utilities
 │       ├── response.ts      # Response helpers
 │       └── validation.ts    # Input validation
 ├── tests/
-│   ├── test-neo4j.js        # Neo4j connectivity tests
-│   ├── test-endpoints.sh    # Local API tests
-│   ├── test-production.sh   # Production API tests
-│   └── explore-data.js      # Database exploration
+│   ├── test-neo4j.js           # Neo4j connectivity tests
+│   ├── test-endpoints.sh       # Local API tests
+│   ├── test-production.sh      # Production API tests
+│   ├── test-concurrent-race.js # Concurrent race condition tests
+│   └── explore-data.js         # Database exploration
 ├── scripts/
 │   ├── populate-sample-data.js  # Sample data generator
 │   ├── cleanup-test-data.js     # Test data cleanup
-│   └── add-indexes.js           # Database index setup (NEW)
+│   └── add-indexes.js           # Database index setup
 ├── docs/
 │   ├── SETUP.md             # Setup & deployment guide
 │   ├── QUICK_START.md       # Quick reference
 │   ├── DEPLOYMENT.md        # Production deployment info
 │   └── neo4j_documentation.md
-├── GRAPH_API_REQUIREMENTS.md # API specification (NEW)
+├── GRAPH_API_REQUIREMENTS.md # API specification
 ├── CLAUDE.md                 # AI assistant guidance
 ├── wrangler.jsonc            # Cloudflare Worker config
 ├── tsconfig.json             # TypeScript config
@@ -439,12 +582,13 @@ npm run logs             # View production logs
 npm test                 # Test Neo4j connectivity
 npm run test:endpoints   # Test API endpoints (local)
 npm run test:production  # Test production deployment
+npm run test:race        # Test concurrent race conditions
 
 # Database utilities
 npm run populate         # Add sample data to Neo4j
 npm run explore          # View database contents
 npm run cleanup          # Remove test data
-npm run add-indexes      # Add performance indexes (NEW)
+npm run add-indexes      # Add performance indexes
 ```
 
 ### Environment Variables
@@ -469,6 +613,9 @@ npm run test:endpoints
 
 # Test production deployment
 npm run test:production
+
+# Test concurrent operations for race conditions
+npm run test:race
 ```
 
 ## Deployment

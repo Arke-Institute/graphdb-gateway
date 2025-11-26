@@ -5,7 +5,107 @@
 import { executeQuery } from '../neo4j';
 import { errorResponse, jsonResponse } from '../utils/response';
 import { ERROR_CODES } from '../constants';
-import { Env, CreateRelationshipsRequest, SuccessResponse } from '../types';
+import {
+  Env,
+  CreateRelationshipsRequest,
+  SuccessResponse,
+  GetEntityRelationshipsResponse,
+  EntityRelationshipDetail,
+} from '../types';
+
+/**
+ * GET /relationships/:canonical_id
+ * Get all relationships for a specific entity
+ */
+export async function handleGetEntityRelationships(
+  env: Env,
+  canonical_id: string
+): Promise<Response> {
+  try {
+    if (!canonical_id) {
+      return errorResponse(
+        'Missing required parameter: canonical_id',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    const query = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+      OPTIONAL MATCH (e)-[r_out:RELATIONSHIP]->(target_out:Entity)
+      OPTIONAL MATCH (source_in:Entity)-[r_in:RELATIONSHIP]->(e)
+      WITH e,
+           collect(DISTINCT {
+             direction: 'outgoing',
+             predicate: r_out.predicate,
+             target_id: target_out.canonical_id,
+             target_code: target_out.code,
+             target_label: target_out.label,
+             target_type: target_out.type,
+             properties: r_out.properties,
+             source_pi: r_out.source_pi,
+             created_at: r_out.created_at
+           }) as outgoing,
+           collect(DISTINCT {
+             direction: 'incoming',
+             predicate: r_in.predicate,
+             target_id: source_in.canonical_id,
+             target_code: source_in.code,
+             target_label: source_in.label,
+             target_type: source_in.type,
+             properties: r_in.properties,
+             source_pi: r_in.source_pi,
+             created_at: r_in.created_at
+           }) as incoming
+      RETURN e.canonical_id as canonical_id, outgoing, incoming
+    `;
+
+    const { records } = await executeQuery(env, query, { canonical_id });
+
+    if (records.length === 0) {
+      const response: GetEntityRelationshipsResponse = {
+        found: false,
+      };
+      return jsonResponse(response);
+    }
+
+    const record = records[0];
+    const outgoing = record.get('outgoing') || [];
+    const incoming = record.get('incoming') || [];
+
+    // Filter out null relationships (from OPTIONAL MATCH with no results)
+    const relationships: EntityRelationshipDetail[] = [
+      ...outgoing.filter((r: any) => r.predicate !== null),
+      ...incoming.filter((r: any) => r.predicate !== null),
+    ].map((r: any) => ({
+      direction: r.direction,
+      predicate: r.predicate,
+      target_id: r.target_id,
+      target_code: r.target_code,
+      target_label: r.target_label,
+      target_type: r.target_type,
+      properties: r.properties ? JSON.parse(r.properties) : {},
+      source_pi: r.source_pi,
+      created_at: r.created_at?.toString(),
+    }));
+
+    const response: GetEntityRelationshipsResponse = {
+      found: true,
+      canonical_id: record.get('canonical_id'),
+      relationships,
+      total_count: relationships.length,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to get entity relationships',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
 
 /**
  * GET /relationships

@@ -21,6 +21,7 @@ import {
   handleCreateRelationships,
   handleMergeRelationships,
   handleListRelationships,
+  handleGetEntityRelationships,
 } from './handlers/relationship';
 import { handleClearAllData, handleCustomQuery } from './handlers/admin';
 import { errorResponse, handleOptions, jsonResponse } from './utils/response';
@@ -70,6 +71,7 @@ const ENDPOINTS = [
   'POST /entities/hierarchy',
   'POST /relationships/create',
   'POST /relationships/merge',
+  'GET /relationships/:canonical_id',
   'GET /relationships',
   'POST /query',
   'POST /admin/clear',
@@ -131,6 +133,23 @@ export async function handleRequest(
     if (canonical_id) {
       try {
         return await handleDeleteEntity(env, canonical_id);
+      } catch (error: any) {
+        return errorResponse(
+          'Internal server error',
+          ERROR_CODES.INTERNAL_ERROR,
+          { message: error.message, stack: error.stack }
+        );
+      }
+    }
+  }
+
+  // Handle GET /relationships/:canonical_id specially (URL parameter)
+  // Must check before the static /relationships route
+  if (request.method === 'GET' && path.startsWith('/relationships/')) {
+    const canonical_id = path.split('/relationships/')[1];
+    if (canonical_id) {
+      try {
+        return await handleGetEntityRelationships(env, canonical_id);
       } catch (error: any) {
         return errorResponse(
           'Internal server error',

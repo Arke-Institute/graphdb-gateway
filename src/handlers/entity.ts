@@ -306,6 +306,12 @@ async function handleEnrichPlaceholder(
 /**
  * Merge Strategy: merge_peers
  * Merge two rich entities with conflict resolution
+ *
+ * Uses optimistic locking with version counter and retry logic.
+ * 1. Read current version and properties
+ * 2. Compute merged properties
+ * 3. Attempt conditional update (only if version matches)
+ * 4. If version mismatch (concurrent modification), retry
  */
 async function handleMergePeers(
   env: Env,
@@ -313,84 +319,103 @@ async function handleMergePeers(
   new_properties: Record<string, any>,
   source_pi: string
 ): Promise<Response> {
-  // First, fetch existing entity properties
-  const fetchQuery = `
-    MATCH (e:Entity {canonical_id: $canonical_id})
-    RETURN e.properties AS properties
-  `;
+  const MAX_RETRIES = 20;
 
-  const { records: fetchRecords } = await executeQuery(env, fetchQuery, { canonical_id });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // Step 1: Read current state
+    const readQuery = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+      RETURN e.properties AS properties,
+             coalesce(e._version, 0) AS version
+    `;
 
-  if (fetchRecords.length === 0) {
-    return errorResponse(
-      `Entity ${canonical_id} not found`,
-      ERROR_CODES.ENTITY_NOT_FOUND,
-      { canonical_id },
-      404
-    );
-  }
+    const { records: readRecords } = await executeQuery(env, readQuery, { canonical_id });
 
-  const existingPropsJson = fetchRecords[0].get('properties');
-  const existingProps = existingPropsJson ? JSON.parse(existingPropsJson) : {};
-
-  // Merge properties with conflict detection
-  const mergedProps = { ...existingProps };
-  const conflicts: PropertyConflict[] = [];
-
-  for (const [key, newValue] of Object.entries(new_properties)) {
-    if (key in existingProps) {
-      const existingValue = existingProps[key];
-
-      // Check if values are different
-      if (JSON.stringify(existingValue) !== JSON.stringify(newValue)) {
-        // Accumulate into array
-        if (Array.isArray(existingValue)) {
-          mergedProps[key] = [...existingValue, newValue];
-        } else {
-          mergedProps[key] = [existingValue, newValue];
-        }
-
-        conflicts.push({
-          property: key,
-          existing_value: existingValue,
-          new_value: newValue,
-          resolution: 'accumulated',
-        });
-      }
-      // If same, keep existing (no change needed)
-    } else {
-      // New property, just add it
-      mergedProps[key] = newValue;
+    if (readRecords.length === 0) {
+      return errorResponse(
+        `Entity ${canonical_id} not found`,
+        ERROR_CODES.ENTITY_NOT_FOUND,
+        { canonical_id },
+        404
+      );
     }
+
+    const currentVersion = readRecords[0].get('version');
+    const existingPropsJson = readRecords[0].get('properties');
+    const existingProps = existingPropsJson ? JSON.parse(existingPropsJson) : {};
+
+    // Step 2: Compute merged properties in JS
+    const mergedProps = { ...existingProps };
+    const conflicts: PropertyConflict[] = [];
+
+    for (const [key, newValue] of Object.entries(new_properties || {})) {
+      if (key in existingProps) {
+        const existingValue = existingProps[key];
+        if (JSON.stringify(existingValue) !== JSON.stringify(newValue)) {
+          // Accumulate into array
+          if (Array.isArray(existingValue)) {
+            mergedProps[key] = [...existingValue, newValue];
+          } else {
+            mergedProps[key] = [existingValue, newValue];
+          }
+          conflicts.push({
+            property: key,
+            existing_value: existingValue,
+            new_value: newValue,
+            resolution: 'accumulated',
+          });
+        }
+      } else {
+        mergedProps[key] = newValue;
+      }
+    }
+
+    // Step 3: Conditional update with version check
+    // This WHERE clause ensures we only update if version hasn't changed
+    const updateQuery = `
+      MATCH (e:Entity {canonical_id: $canonical_id})
+      WHERE coalesce(e._version, 0) = $expected_version
+      SET e.properties = $merged_properties,
+          e._version = $expected_version + 1,
+          e.last_updated = datetime()
+      WITH e
+      MERGE (pi:PI {id: $source_pi})
+      MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
+      ON CREATE SET rel.original_code = e.code, rel.extracted_at = datetime()
+      RETURN e.canonical_id AS canonical_id
+    `;
+
+    const { records: updateRecords } = await executeQuery(env, updateQuery, {
+      canonical_id,
+      expected_version: typeof currentVersion === 'object' ? currentVersion.toNumber() : currentVersion,
+      merged_properties: JSON.stringify(mergedProps),
+      source_pi,
+    });
+
+    if (updateRecords.length > 0) {
+      // Success - version matched, update applied
+      const response: MergeEntityResponse = {
+        canonical_id,
+        updated: true,
+        conflicts: conflicts.length > 0 ? conflicts : undefined,
+      };
+      return jsonResponse(response);
+    }
+
+    // Version mismatch - another transaction modified the entity
+    // Exponential backoff with jitter to reduce contention
+    const baseDelay = Math.min(100 * Math.pow(1.5, attempt - 1), 2000);
+    const jitter = Math.random() * baseDelay * 0.5;
+    await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
   }
 
-  // Update entity with merged properties
-  const updateQuery = `
-    MATCH (e:Entity {canonical_id: $canonical_id})
-    SET e.properties = $merged_properties,
-        e.last_updated = datetime()
-        // NOTE: created_by_pi is NOT modified (preserved from first creator)
-    MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
-    ON CREATE SET
-      rel.original_code = e.code,
-      rel.extracted_at = datetime()
-    RETURN e
-  `;
-
-  await executeQuery(env, updateQuery, {
-    canonical_id,
-    merged_properties: JSON.stringify(mergedProps),
-    source_pi,
-  });
-
-  const response: MergeEntityResponse = {
-    canonical_id,
-    updated: true,
-    conflicts: conflicts.length > 0 ? conflicts : undefined,
-  };
-
-  return jsonResponse(response);
+  // Exhausted retries
+  return errorResponse(
+    `Failed to merge entity after ${MAX_RETRIES} retries due to concurrent modifications`,
+    'CONCURRENT_MODIFICATION',
+    { canonical_id },
+    409
+  );
 }
 
 /**

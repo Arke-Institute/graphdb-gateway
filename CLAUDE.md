@@ -522,6 +522,32 @@ Entity references can appear in properties:
 - Returns `relationshipsCreated` and `relationshipsUpdated` counts
 - **Recommended for orchestrator use**
 
+**GET /relationships/:canonical_id** - Get relationships for a specific entity
+- Returns all incoming and outgoing RELATIONSHIP edges for an entity
+- Each relationship includes: direction, predicate, target entity info, properties, source_pi
+- Response:
+  ```json
+  {
+    "found": true,
+    "canonical_id": "...",
+    "relationships": [
+      {
+        "direction": "outgoing",
+        "predicate": "affiliated_with",
+        "target_id": "...",
+        "target_code": "...",
+        "target_label": "...",
+        "target_type": "...",
+        "properties": {...},
+        "source_pi": "...",
+        "created_at": "..."
+      }
+    ],
+    "total_count": 2
+  }
+  ```
+- Returns `{ found: false }` if entity not found
+
 **GET /relationships** - List all relationships
 - Returns all RELATIONSHIP edges in the database
 - Includes subject_id, predicate, object_id, properties, source_pi
