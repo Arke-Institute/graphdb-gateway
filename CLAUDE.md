@@ -599,6 +599,15 @@ Entity references can appear in properties:
 - Returns conflict details in response
 - Adds source PI relationship
 
+**Concurrency Safety (Optimistic Locking)**:
+- Uses `_version` field on entities to detect concurrent modifications
+- Pattern: read version → compute merge → conditional write (only if version unchanged)
+- If version mismatch detected, retries with exponential backoff (up to 20 attempts)
+- Backoff: `100ms * 1.5^attempt` (capped at 2s) + random jitter
+- Returns 409 if all retries exhausted (very rare under normal load)
+- Why not single-query APOC? Neo4j's READ COMMITTED isolation allows concurrent transactions to read stale data, so optimistic locking is required regardless
+- Test: `npm run test:race` and `tests/test-merge-peers-concurrent.js`
+
 #### link_only
 **When to use**: Just linking a PI to existing entity
 
