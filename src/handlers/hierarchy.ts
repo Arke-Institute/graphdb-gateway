@@ -1,349 +1,206 @@
 /**
- * Handlers for hierarchy operations (parent/child PI traversal)
+ * Handlers for hierarchy/lineage operations
  */
 
 import { executeQuery } from '../neo4j';
 import { errorResponse, jsonResponse } from '../utils/response';
-import { isPlaceholder } from '../utils/validation';
 import { ERROR_CODES } from '../constants';
 import {
   Env,
-  FindInHierarchyRequest,
-  FindInHierarchyResponse,
-  GetEntitiesFromHierarchyRequest,
-  GetEntitiesFromHierarchyResponse,
-  HierarchyEntity,
+  FindInLineageRequest,
+  FindInLineageResponse,
 } from '../types';
 
-/**
- * POST /entity/find-in-hierarchy
- * Find an entity by code in parent or child PIs
- */
-export async function handleFindInHierarchy(
-  env: Env,
-  body: FindInHierarchyRequest
-): Promise<Response> {
-  try {
-    const { pi, code, search_scope, include_placeholder = true } = body;
-
-    if (!pi || !code || !search_scope) {
-      return errorResponse(
-        'Missing required fields: pi, code, search_scope',
-        ERROR_CODES.VALIDATION_ERROR,
-        null,
-        400
-      );
-    }
-
-    if (!['parents', 'children', 'both'].includes(search_scope)) {
-      return errorResponse(
-        'search_scope must be one of: parents, children, both',
-        ERROR_CODES.VALIDATION_ERROR,
-        { provided: search_scope },
-        400
-      );
-    }
-
-    let query = '';
-    let foundIn: 'parent' | 'child' | undefined;
-
-    // Try children first if searching children or both
-    if (search_scope === 'children' || search_scope === 'both') {
-      const childQuery = `
-        MATCH (current:PI {id: $pi})<-[:CHILD_OF]-(descendant:PI)
-        MATCH (descendant)<-[:EXTRACTED_FROM]-(entity:Entity {code: $code})
-        ${include_placeholder ? '' : 'WHERE entity.type <> "unknown"'}
-        OPTIONAL MATCH (entity)-[:EXTRACTED_FROM]->(source_pi:PI)
-        WITH entity, collect(DISTINCT source_pi.id) AS source_pis
-        RETURN entity.canonical_id AS canonical_id,
-               entity.code AS code,
-               entity.label AS label,
-               entity.type AS type,
-               entity.properties AS properties,
-               entity.created_by_pi AS created_by_pi,
-               source_pis
-        LIMIT 1
-      `;
-
-      const { records: childRecords } = await executeQuery(env, childQuery, {
-        pi,
-        code,
-      });
-
-      if (childRecords.length > 0) {
-        const record = childRecords[0];
-        const properties = record.get('properties')
-          ? JSON.parse(record.get('properties'))
-          : {};
-
-        const entity = {
-          canonical_id: record.get('canonical_id'),
-          code: record.get('code'),
-          label: record.get('label'),
-          type: record.get('type'),
-          properties,
-          created_by_pi: record.get('created_by_pi'),
-          source_pis: record.get('source_pis'),
-          is_placeholder: isPlaceholder({
-            type: record.get('type'),
-            properties,
-          }),
-        };
-
-        const response: FindInHierarchyResponse = {
-          found: true,
-          entity,
-          found_in: 'child',
-        };
-
-        return jsonResponse(response);
-      }
-    }
-
-    // Try parents if searching parents or both (and not found in children)
-    if (search_scope === 'parents' || search_scope === 'both') {
-      const parentQuery = `
-        MATCH (current:PI {id: $pi})-[:CHILD_OF]->(ancestor:PI)
-        MATCH (ancestor)<-[:EXTRACTED_FROM]-(entity:Entity {code: $code})
-        ${include_placeholder ? '' : 'WHERE entity.type <> "unknown"'}
-        OPTIONAL MATCH (entity)-[:EXTRACTED_FROM]->(source_pi:PI)
-        WITH entity, collect(DISTINCT source_pi.id) AS source_pis
-        RETURN entity.canonical_id AS canonical_id,
-               entity.code AS code,
-               entity.label AS label,
-               entity.type AS type,
-               entity.properties AS properties,
-               entity.created_by_pi AS created_by_pi,
-               source_pis
-        LIMIT 1
-      `;
-
-      const { records: parentRecords } = await executeQuery(env, parentQuery, {
-        pi,
-        code,
-      });
-
-      if (parentRecords.length > 0) {
-        const record = parentRecords[0];
-        const properties = record.get('properties')
-          ? JSON.parse(record.get('properties'))
-          : {};
-
-        const entity = {
-          canonical_id: record.get('canonical_id'),
-          code: record.get('code'),
-          label: record.get('label'),
-          type: record.get('type'),
-          properties,
-          created_by_pi: record.get('created_by_pi'),
-          source_pis: record.get('source_pis'),
-          is_placeholder: isPlaceholder({
-            type: record.get('type'),
-            properties,
-          }),
-        };
-
-        const response: FindInHierarchyResponse = {
-          found: true,
-          entity,
-          found_in: 'parent',
-        };
-
-        return jsonResponse(response);
-      }
-    }
-
-    // Not found
-    const response: FindInHierarchyResponse = {
-      found: false,
-    };
-
-    return jsonResponse(response);
-  } catch (error: any) {
-    return errorResponse(
-      error.message || 'Failed to find entity in hierarchy',
-      error.code,
-      { stack: error.stack }
-    );
-  }
+interface LineageMatch {
+  canonical_id: string;
+  code: string;
+  label: string;
+  type: string;
+  properties: Record<string, any>;
+  created_by_pi: string;
+  hops: number;
+  direction: 'same' | 'ancestor' | 'descendant';
 }
 
 /**
- * POST /entities/hierarchy
- * Bulk fetch all entities from parent/child PIs (for indexing in SETUP phase)
+ * POST /entities/find-in-lineage
+ * Find a candidate entity in direct lineage (ancestors/descendants only)
+ * Does NOT match across sibling branches - only up or down the current branch
  */
-export async function handleGetEntitiesHierarchy(
+export async function handleFindInLineage(
   env: Env,
-  body: GetEntitiesFromHierarchyRequest
+  body: FindInLineageRequest
 ): Promise<Response> {
   try {
-    const {
-      pi,
-      direction,
-      exclude_type = [],
-      include_placeholders = true,
-    } = body;
+    const { sourcePi, candidateIds, maxHops } = body;
 
-    if (!pi || !direction) {
+    if (!sourcePi || !candidateIds || !Array.isArray(candidateIds) || candidateIds.length === 0) {
       return errorResponse(
-        'Missing required fields: pi, direction',
+        'Missing required fields: sourcePi, candidateIds (non-empty array)',
         ERROR_CODES.VALIDATION_ERROR,
         null,
         400
       );
     }
 
-    if (!['ancestors', 'descendants', 'both'].includes(direction)) {
+    if (typeof maxHops !== 'number' || maxHops < 0) {
       return errorResponse(
-        'direction must be one of: ancestors, descendants, both',
+        'maxHops must be a non-negative number',
         ERROR_CODES.VALIDATION_ERROR,
-        { provided: direction },
+        { provided: maxHops },
         400
       );
     }
 
-    const entitiesFromParents: HierarchyEntity[] = [];
-    const entitiesFromChildren: HierarchyEntity[] = [];
+    const matches: LineageMatch[] = [];
 
-    // Helper to build WHERE clause
-    const buildWhereClause = () => {
-      const conditions: string[] = [];
-      if (exclude_type.length > 0) {
-        conditions.push('NOT entity.type IN $exclude_types');
-      }
-      if (!include_placeholders) {
-        conditions.push('entity.type <> "unknown"');
-      }
-      return conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    };
+    // 1. Check same PI (hops = 0)
+    const samePiQuery = `
+      MATCH (source:PI {id: $sourcePi})
+      MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(source)
+      WHERE candidate.canonical_id IN $candidateIds
+      RETURN candidate.canonical_id AS canonical_id,
+             candidate.code AS code,
+             candidate.label AS label,
+             candidate.type AS type,
+             candidate.properties AS properties,
+             candidate.created_by_pi AS created_by_pi
+      LIMIT 1
+    `;
 
-    // Fetch from ancestors (parents)
-    if (direction === 'ancestors' || direction === 'both') {
+    const { records: samePiRecords } = await executeQuery(env, samePiQuery, {
+      sourcePi,
+      candidateIds,
+    });
+
+    if (samePiRecords.length > 0) {
+      const record = samePiRecords[0];
+      matches.push({
+        canonical_id: record.get('canonical_id'),
+        code: record.get('code'),
+        label: record.get('label'),
+        type: record.get('type'),
+        properties: record.get('properties') ? JSON.parse(record.get('properties')) : {},
+        created_by_pi: record.get('created_by_pi'),
+        hops: 0,
+        direction: 'same',
+      });
+    }
+
+    // 2. Check ancestors (source goes UP via CHILD_OF)
+    // Only if we haven't found a same-PI match (hops=0 is best)
+    if (matches.length === 0 && maxHops > 0) {
       const ancestorQuery = `
-        MATCH (current:PI {id: $pi})-[:CHILD_OF*]->(ancestor:PI)
-        MATCH (ancestor)<-[:EXTRACTED_FROM]-(entity:Entity)
-        ${buildWhereClause()}
-        OPTIONAL MATCH (entity)-[:EXTRACTED_FROM]->(all_source:PI)
-        WITH entity,
-             ancestor,
-             collect(DISTINCT all_source.id) AS all_source_pis
-        RETURN DISTINCT
-          entity.canonical_id AS canonical_id,
-          entity.code AS code,
-          entity.label AS label,
-          entity.type AS type,
-          entity.properties AS properties,
-          entity.created_by_pi AS created_by_pi,
-          ancestor.id AS source_pi,
-          all_source_pis
+        MATCH (source:PI {id: $sourcePi})
+        MATCH path = (source)-[:CHILD_OF*1..20]->(ancestorPi:PI)
+        MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(ancestorPi)
+        WHERE candidate.canonical_id IN $candidateIds
+          AND length(path) <= $maxHops
+        RETURN candidate.canonical_id AS canonical_id,
+               candidate.code AS code,
+               candidate.label AS label,
+               candidate.type AS type,
+               candidate.properties AS properties,
+               candidate.created_by_pi AS created_by_pi,
+               length(path) AS hops
+        ORDER BY hops ASC
+        LIMIT 1
       `;
 
-      const { records: ancestorRecords } = await executeQuery(
-        env,
-        ancestorQuery,
-        {
-          pi,
-          exclude_types: exclude_type,
-        }
-      );
+      const { records: ancestorRecords } = await executeQuery(env, ancestorQuery, {
+        sourcePi,
+        candidateIds,
+        maxHops,
+      });
 
-      for (const record of ancestorRecords) {
-        const properties = record.get('properties')
-          ? JSON.parse(record.get('properties'))
-          : {};
-
-        entitiesFromParents.push({
+      if (ancestorRecords.length > 0) {
+        const record = ancestorRecords[0];
+        matches.push({
           canonical_id: record.get('canonical_id'),
           code: record.get('code'),
           label: record.get('label'),
           type: record.get('type'),
-          properties,
+          properties: record.get('properties') ? JSON.parse(record.get('properties')) : {},
           created_by_pi: record.get('created_by_pi'),
-          source_pi: record.get('source_pi'),
-          all_source_pis: record.get('all_source_pis'),
-          is_placeholder: isPlaceholder({
-            type: record.get('type'),
-            properties,
-          }),
+          hops: typeof record.get('hops') === 'object'
+            ? record.get('hops').toNumber()
+            : record.get('hops'),
+          direction: 'ancestor',
         });
       }
     }
 
-    // Fetch from descendants (children)
-    if (direction === 'descendants' || direction === 'both') {
+    // 3. Check descendants (descendantPi goes UP via CHILD_OF to reach source)
+    // Only check if maxHops > 0
+    if (maxHops > 0) {
       const descendantQuery = `
-        MATCH (current:PI {id: $pi})<-[:CHILD_OF*]-(descendant:PI)
-        MATCH (descendant)<-[:EXTRACTED_FROM]-(entity:Entity)
-        ${buildWhereClause()}
-        OPTIONAL MATCH (entity)-[:EXTRACTED_FROM]->(all_source:PI)
-        WITH entity,
-             descendant,
-             collect(DISTINCT all_source.id) AS all_source_pis
-        RETURN DISTINCT
-          entity.canonical_id AS canonical_id,
-          entity.code AS code,
-          entity.label AS label,
-          entity.type AS type,
-          entity.properties AS properties,
-          entity.created_by_pi AS created_by_pi,
-          descendant.id AS source_pi,
-          all_source_pis
+        MATCH (source:PI {id: $sourcePi})
+        MATCH path = (descendantPi:PI)-[:CHILD_OF*1..20]->(source)
+        MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(descendantPi)
+        WHERE candidate.canonical_id IN $candidateIds
+          AND length(path) <= $maxHops
+        RETURN candidate.canonical_id AS canonical_id,
+               candidate.code AS code,
+               candidate.label AS label,
+               candidate.type AS type,
+               candidate.properties AS properties,
+               candidate.created_by_pi AS created_by_pi,
+               length(path) AS hops
+        ORDER BY hops ASC
+        LIMIT 1
       `;
 
-      const { records: descendantRecords } = await executeQuery(
-        env,
-        descendantQuery,
-        {
-          pi,
-          exclude_types: exclude_type,
-        }
-      );
+      const { records: descendantRecords } = await executeQuery(env, descendantQuery, {
+        sourcePi,
+        candidateIds,
+        maxHops,
+      });
 
-      for (const record of descendantRecords) {
-        const properties = record.get('properties')
-          ? JSON.parse(record.get('properties'))
-          : {};
-
-        entitiesFromChildren.push({
+      if (descendantRecords.length > 0) {
+        const record = descendantRecords[0];
+        matches.push({
           canonical_id: record.get('canonical_id'),
           code: record.get('code'),
           label: record.get('label'),
           type: record.get('type'),
-          properties,
+          properties: record.get('properties') ? JSON.parse(record.get('properties')) : {},
           created_by_pi: record.get('created_by_pi'),
-          source_pi: record.get('source_pi'),
-          all_source_pis: record.get('all_source_pis'),
-          is_placeholder: isPlaceholder({
-            type: record.get('type'),
-            properties,
-          }),
+          hops: typeof record.get('hops') === 'object'
+            ? record.get('hops').toNumber()
+            : record.get('hops'),
+          direction: 'descendant',
         });
       }
     }
 
-    // Combine and deduplicate by canonical_id
-    const allEntities = [...entitiesFromParents, ...entitiesFromChildren];
-    const deduplicatedMap = new Map<string, HierarchyEntity>();
-
-    for (const entity of allEntities) {
-      if (!deduplicatedMap.has(entity.canonical_id)) {
-        deduplicatedMap.set(entity.canonical_id, entity);
-      }
+    // No matches found in lineage
+    if (matches.length === 0) {
+      const response: FindInLineageResponse = { found: false };
+      return jsonResponse(response);
     }
 
-    const entities = Array.from(deduplicatedMap.values());
+    // Return the nearest match (lowest hops)
+    matches.sort((a, b) => a.hops - b.hops);
+    const nearest = matches[0];
 
-    const response: GetEntitiesFromHierarchyResponse = {
-      entities,
-      total_count: entities.length,
-      from_parents: entitiesFromParents.length,
-      from_children: entitiesFromChildren.length,
+    const response: FindInLineageResponse = {
+      found: true,
+      entity: {
+        canonical_id: nearest.canonical_id,
+        code: nearest.code,
+        label: nearest.label,
+        type: nearest.type,
+        properties: nearest.properties,
+        created_by_pi: nearest.created_by_pi,
+      },
+      hops: nearest.hops,
+      direction: nearest.direction,
     };
 
     return jsonResponse(response);
   } catch (error: any) {
     return errorResponse(
-      error.message || 'Failed to get entities from hierarchy',
+      error.message || 'Failed to find entity in lineage',
       error.code,
       { stack: error.stack }
     );

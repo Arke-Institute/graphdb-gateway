@@ -199,56 +199,72 @@ Content-Type: application/json
 }
 ```
 
-### Hierarchy Operations
-
-#### Find Entity in Hierarchy
+#### Lookup Entities by Code
 ```http
-POST /entity/find-in-hierarchy
+POST /entities/lookup-by-code
 Content-Type: application/json
 
 {
-  "pi": "01KA1H53CP...",
-  "code": "george_washington",
-  "search_scope": "both",          // parents | children | both
-  "include_placeholder": true      // Optional: include type="unknown"
+  "code": "concert_a",
+  "type": "unknown",        // Optional: only return this type
+  "excludeType": "unknown"  // Optional: exclude this type
 }
 
 // Response
+{
+  "entities": [
+    {
+      "canonical_id": "uuid_123",
+      "code": "concert_a",
+      "label": "Concert A",
+      "type": "event",
+      "properties": {...},
+      "created_by_pi": "...",
+      "source_pis": [...]
+    }
+  ],
+  "count": 1
+}
+```
+
+### Lineage Operations
+
+#### Find Entity in Lineage
+```http
+POST /entities/find-in-lineage
+Content-Type: application/json
+
+{
+  "sourcePi": "01KA1H53CP...",
+  "candidateIds": ["uuid1", "uuid2", "uuid3"],
+  "maxHops": 10
+}
+
+// Response (found in direct lineage)
 {
   "found": true,
   "entity": {
     "canonical_id": "uuid_123",
-    "code": "george_washington",
-    "label": "George Washington",
-    "type": "person",
-    "properties": {"role": "president"},
-    "source_pis": ["01KA1H63MP..."],
-    "is_placeholder": false
+    "code": "concert_a",
+    "label": "Concert A",
+    "type": "event",
+    "properties": {...},
+    "created_by_pi": "..."
   },
-  "found_in": "parent"  // parent | child
+  "hops": 2,
+  "direction": "ancestor"  // ancestor | descendant | same
+}
+
+// Response (not in lineage)
+{
+  "found": false
 }
 ```
 
-#### Get Entities from Hierarchy (Bulk)
-```http
-POST /entities/hierarchy
-Content-Type: application/json
-
-{
-  "pi": "01KA1H53CP...",
-  "direction": "both",              // ancestors | descendants | both
-  "exclude_type": ["file"],         // Optional: exclude types
-  "include_placeholders": true      // Optional: include type="unknown"
-}
-
-// Response
-{
-  "entities": [...],
-  "total_count": 45,
-  "from_parents": 20,
-  "from_children": 25
-}
-```
+**Notes:**
+- **Direct lineage only**: Only matches ancestors (up) or descendants (down)
+- **No cousin matching**: Entities in sibling branches are NOT matched
+- Used for placeholder resolution within the same document branch
 
 ### Relationship Operations
 
@@ -458,7 +474,7 @@ graphdb-gateway/
 │   ├── handlers/             # Domain-specific handlers
 │   │   ├── pi.ts            # PI operations
 │   │   ├── entity.ts        # Entity CRUD + atomic merge
-│   │   ├── hierarchy.ts     # Hierarchy traversal
+│   │   ├── hierarchy.ts     # Lineage operations
 │   │   ├── relationship.ts  # Relationship operations
 │   │   └── admin.ts         # Admin operations (query, clear)
 │   ├── types/                # TypeScript type definitions
@@ -466,7 +482,7 @@ graphdb-gateway/
 │   │   ├── common.ts        # Shared types
 │   │   ├── pi.ts            # PI types
 │   │   ├── entity.ts        # Entity types
-│   │   ├── hierarchy.ts     # Hierarchy types
+│   │   ├── hierarchy.ts     # Lineage types
 │   │   └── relationship.ts  # Relationship types
 │   └── utils/                # Shared utilities
 │       ├── response.ts      # Response helpers

@@ -20,6 +20,8 @@ import {
   DeleteEntityResponse,
   GetEntityResponse,
   EntityExistsResponse,
+  LookupByCodeRequest,
+  LookupByCodeResponse,
 } from '../types';
 
 /**
@@ -602,6 +604,75 @@ export async function handleGetEntity(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to get entity',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /entities/lookup-by-code
+ * Find all entities with a specific code, optionally filtered by type
+ */
+export async function handleLookupByCode(
+  env: Env,
+  body: LookupByCodeRequest
+): Promise<Response> {
+  try {
+    const { code, type, excludeType } = body;
+
+    if (!code) {
+      return errorResponse(
+        'Missing required field: code',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    const query = `
+      MATCH (e:Entity {code: $code})
+      WHERE ($type IS NULL OR e.type = $type)
+        AND ($excludeType IS NULL OR e.type <> $excludeType)
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+      WITH e, collect(DISTINCT pi.id) AS source_pis
+      RETURN e.canonical_id AS canonical_id,
+             e.code AS code,
+             e.label AS label,
+             e.type AS type,
+             e.properties AS properties,
+             e.created_by_pi AS created_by_pi,
+             source_pis
+      ORDER BY e.type, e.label
+    `;
+
+    const { records } = await executeQuery(env, query, {
+      code,
+      type: type || null,
+      excludeType: excludeType || null,
+    });
+
+    const entities: EntityWithSource[] = records.map((record) => ({
+      canonical_id: record.get('canonical_id'),
+      code: record.get('code'),
+      label: record.get('label'),
+      type: record.get('type'),
+      properties: record.get('properties')
+        ? JSON.parse(record.get('properties'))
+        : {},
+      created_by_pi: record.get('created_by_pi'),
+      source_pis: record.get('source_pis'),
+    }));
+
+    const response: LookupByCodeResponse = {
+      entities,
+      count: entities.length,
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to lookup entities by code',
       error.code,
       { stack: error.stack }
     );

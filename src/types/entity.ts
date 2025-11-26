@@ -134,3 +134,20 @@ export interface GetEntityResponse {
 export interface EntityExistsResponse {
   exists: boolean;
 }
+
+/**
+ * Request to lookup entities by code with optional type filtering
+ */
+export interface LookupByCodeRequest {
+  code: string;
+  type?: string;         // Only return entities of this type
+  excludeType?: string;  // Exclude entities of this type
+}
+
+/**
+ * Response from lookup by code
+ */
+export interface LookupByCodeResponse {
+  entities: EntityWithSource[];
+  count: number;
+}

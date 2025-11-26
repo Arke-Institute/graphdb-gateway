@@ -82,7 +82,7 @@ src/
 ├── handlers/             # Request handlers by domain
 │   ├── pi.ts            # PI creation and management
 │   ├── entity.ts        # Entity CRUD (create, merge, query, list, delete, get, exists)
-│   ├── hierarchy.ts     # Hierarchy lookups (find-in-hierarchy, entities/hierarchy)
+│   ├── hierarchy.ts     # Lineage lookups (find-in-lineage)
 │   └── relationship.ts  # Relationship creation
 │
 ├── types/                # Type definitions by domain
@@ -383,21 +383,66 @@ CREATE (subject)-[:RELATIONSHIP {...}]->(object)
 - Optional type filtering
 - Deduplicates entities by canonical_id
 
-### Hierarchy Operations
+**POST /entities/lookup-by-code** - Find entities by code with type filtering
+- Find all entities with a specific code
+- Optional `type` filter: only return entities of this type
+- Optional `excludeType` filter: exclude entities of this type
+- Use cases:
+  - Find placeholders: `{ code: "concert_a", type: "unknown" }`
+  - Find real entities: `{ code: "concert_a", excludeType: "unknown" }`
+- Request:
+  ```json
+  {
+    "code": "concert_a",
+    "type": "unknown",
+    "excludeType": "unknown"
+  }
+  ```
+- Response:
+  ```json
+  {
+    "entities": [...],
+    "count": 1
+  }
+  ```
 
-**POST /entity/find-in-hierarchy** - Find entity in parent/child hierarchy
-- Search in parents, children, or both
-- Returns first match found
-- Includes placeholder detection (`is_placeholder` flag)
-- Used by orchestrator for entity resolution
+### Lineage Operations
 
-**POST /entities/hierarchy** - Bulk fetch entities from hierarchy
-- Get all entities from ancestors, descendants, or both
-- Optional type exclusion (e.g., exclude "file" entities)
-- Optional placeholder filtering
-- Deduplicates by canonical_id
-- Returns counts (from_parents, from_children)
-- Used by orchestrator in SETUP phase for caching
+**POST /entities/find-in-lineage** - Find entity in direct lineage (ancestors/descendants only)
+- Given a source PI and list of candidate entity IDs, find candidates in the direct lineage
+- **Direct lineage only**: Only matches ancestors (up) or descendants (down)
+- **No cousin matching**: Entities in sibling branches (up then down) are NOT matched
+- Request:
+  ```json
+  {
+    "sourcePi": "01KAZ42PYC...",
+    "candidateIds": ["uuid1", "uuid2", "uuid3"],
+    "maxHops": 10
+  }
+  ```
+- Response (found):
+  ```json
+  {
+    "found": true,
+    "entity": {
+      "canonical_id": "...",
+      "code": "concert_a",
+      "label": "Concert A",
+      "type": "event",
+      "properties": {...},
+      "created_by_pi": "..."
+    },
+    "hops": 2,
+    "direction": "ancestor"
+  }
+  ```
+- Response (not in lineage):
+  ```json
+  {
+    "found": false
+  }
+  ```
+- Use case: Placeholder resolution - find the real entity in the same document branch
 
 ### Relationship Operations
 

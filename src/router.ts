@@ -11,11 +11,9 @@ import {
   handleDeleteEntity,
   handleGetEntity,
   handleEntityExists,
+  handleLookupByCode,
 } from './handlers/entity';
-import {
-  handleFindInHierarchy,
-  handleGetEntitiesHierarchy,
-} from './handlers/hierarchy';
+import { handleFindInLineage } from './handlers/hierarchy';
 import {
   handleCreateRelationships,
   handleMergeRelationships,
@@ -41,9 +39,9 @@ const routes: RouteTable = {
   'POST /entity/create': handleCreateEntity,
   'POST /entity/merge': handleMergeEntity,
   'POST /entity/query': handleQueryEntity,
-  'POST /entity/find-in-hierarchy': handleFindInHierarchy,
   'POST /entities/list': handleListEntities,
-  'POST /entities/hierarchy': handleGetEntitiesHierarchy,
+  'POST /entities/lookup-by-code': handleLookupByCode,
+  'POST /entities/find-in-lineage': handleFindInLineage,
   'POST /relationships/create': handleCreateRelationships,
   'POST /relationships/merge': handleMergeRelationships,
   'GET /relationships': (env: Env) => handleListRelationships(env),
@@ -62,9 +60,9 @@ const ENDPOINTS = [
   'GET /entity/exists/:canonical_id',
   'GET /entity/:canonical_id',
   'DELETE /entity/:canonical_id',
-  'POST /entity/find-in-hierarchy',
   'POST /entities/list',
-  'POST /entities/hierarchy',
+  'POST /entities/lookup-by-code',
+  'POST /entities/find-in-lineage',
   'POST /relationships/create',
   'POST /relationships/merge',
   'GET /relationships/:canonical_id',
