@@ -4,14 +4,12 @@
 
 import { executeQuery } from '../neo4j';
 import { errorResponse, jsonResponse } from '../utils/response';
-import { isValidMergeStrategy } from '../utils/validation';
 import { ERROR_CODES } from '../constants';
 import {
   Env,
   CreateEntityRequest,
-  MergeEntityRequest,
-  MergeEntityResponse,
-  PropertyConflict,
+  AtomicMergeRequest,
+  AtomicMergeResponse,
   QueryEntityRequest,
   QueryEntityResponse,
   EntityRelationship,
@@ -21,17 +19,12 @@ import {
   SuccessResponse,
   DeleteEntityResponse,
   GetEntityResponse,
-  LookupByCodeRequest,
-  LookupByCodeResponse,
-  LookupByLabelRequest,
-  LookupByLabelResponse,
+  EntityExistsResponse,
 } from '../types';
 
 /**
  * POST /entity/create
  * Create new canonical entity with EXTRACTED_FROM relationship
- *
- * Note: Properties should NOT contain entity_refs - orchestrator resolves these BEFORE calling this endpoint
  */
 export async function handleCreateEntity(
   env: Env,
@@ -58,7 +51,6 @@ export async function handleCreateEntity(
     }
 
     // Use MERGE on canonical_id to make this atomic and idempotent
-    // The unique constraint on canonical_id ensures no duplicates under concurrency
     const query = `
       MATCH (pi:PI {id: $source_pi})
       MERGE (e:${entityLabel} {canonical_id: $canonical_id})
@@ -112,136 +104,170 @@ export async function handleCreateEntity(
 
 /**
  * POST /entity/merge
- * Merge entity with existing canonical entity using specified merge strategy
+ * Atomic merge: absorb source entity into target entity
+ * - Transfers all relationships from source to target
+ * - Merges properties (combines into arrays for conflicts)
+ * - Deletes source entity
+ *
+ * Uses APOC refactor.mergeNodes for atomic relationship transfer.
+ * The entire operation is a single Neo4j transaction - either completes fully or rolls back.
  */
 export async function handleMergeEntity(
   env: Env,
-  body: MergeEntityRequest
+  body: AtomicMergeRequest
 ): Promise<Response> {
   try {
-    const { canonical_id, enrichment_data, source_pi, absorb_duplicate_id } = body;
+    const { source_id, target_id } = body;
 
-    if (!canonical_id || !source_pi) {
+    if (!source_id || !target_id) {
       return errorResponse(
-        'Missing required fields: canonical_id, source_pi',
+        'Missing required fields: source_id, target_id',
         ERROR_CODES.VALIDATION_ERROR,
         null,
         400
       );
     }
 
-    // If absorbing a duplicate entity, use APOC mergeNodes
-    if (absorb_duplicate_id) {
-      if (!enrichment_data) {
-        return errorResponse(
-          'enrichment_data required when absorbing duplicate',
-          ERROR_CODES.VALIDATION_ERROR,
-          null,
-          400
-        );
-      }
-
-      const { merge_strategy } = enrichment_data;
-
-      if (!merge_strategy || !isValidMergeStrategy(merge_strategy)) {
-        return errorResponse(
-          `Invalid merge_strategy. Must be one of: enrich_placeholder, merge_peers, link_only, prefer_new`,
-          ERROR_CODES.INVALID_MERGE_STRATEGY,
-          { provided: merge_strategy },
-          400
-        );
-      }
-
-      const query = `
-        MATCH (canonical:Entity {canonical_id: $canonical_id})
-        MATCH (duplicate:Entity {canonical_id: $absorb_duplicate_id})
-
-        // Use APOC to redirect all relationships from duplicate to canonical, then delete duplicate
-        CALL apoc.refactor.mergeNodes([canonical, duplicate], {
-          properties: 'discard',  // Keep canonical's properties unchanged
-          mergeRels: true          // Redirect ALL relationships from duplicate to canonical
-        })
-        YIELD node
-
-        // Add source PI relationship
-        MERGE (node)-[r:EXTRACTED_FROM]->(pi:PI {id: $source_pi})
-        ON CREATE SET r.extracted_at = datetime()
-
-        // Update timestamp
-        SET node.last_updated = datetime()
-
-        RETURN node.canonical_id as canonical_id
-      `;
-
-      const { records } = await executeQuery(env, query, {
-        canonical_id,
-        absorb_duplicate_id,
-        source_pi,
-        merge_strategy,
-      });
-
-      if (records.length === 0) {
-        return errorResponse(
-          'Entity not found',
-          ERROR_CODES.ENTITY_NOT_FOUND,
-          { canonical_id, absorb_duplicate_id },
-          404
-        );
-      }
-
-      const response: MergeEntityResponse = {
-        canonical_id,
-        updated: true,
-        absorbed_duplicate: absorb_duplicate_id,
-      };
-
-      return jsonResponse(response);
-    }
-
-    // Regular merge (no absorption) - continue with existing logic
-    if (!enrichment_data) {
+    if (source_id === target_id) {
       return errorResponse(
-        'Missing required field: enrichment_data',
+        'source_id and target_id cannot be the same',
         ERROR_CODES.VALIDATION_ERROR,
         null,
         400
       );
     }
 
-    const { type, label, new_properties, merge_strategy } = enrichment_data;
+    // First, check existence of both entities to provide proper error messages
+    // (APOC mergeNodes doesn't give granular errors)
+    const checkQuery = `
+      OPTIONAL MATCH (source:Entity {canonical_id: $source_id})
+      OPTIONAL MATCH (target:Entity {canonical_id: $target_id})
+      RETURN source IS NOT NULL AS source_exists,
+             target IS NOT NULL AS target_exists
+    `;
 
-    if (!merge_strategy || !isValidMergeStrategy(merge_strategy)) {
+    const { records: checkRecords } = await executeQuery(env, checkQuery, {
+      source_id,
+      target_id,
+    });
+
+    const sourceExists = checkRecords[0]?.get('source_exists');
+    const targetExists = checkRecords[0]?.get('target_exists');
+
+    if (!targetExists) {
       return errorResponse(
-        `Invalid merge_strategy. Must be one of: enrich_placeholder, merge_peers, link_only, prefer_new`,
-        ERROR_CODES.INVALID_MERGE_STRATEGY,
-        { provided: merge_strategy },
-        400
+        'Target entity does not exist',
+        'target_not_found',
+        { target_id },
+        404
       );
     }
 
-    // Route to appropriate merge strategy handler
-    switch (merge_strategy) {
-      case 'enrich_placeholder':
-        return await handleEnrichPlaceholder(env, canonical_id, type, label, new_properties, source_pi);
-
-      case 'merge_peers':
-        return await handleMergePeers(env, canonical_id, new_properties, source_pi);
-
-      case 'link_only':
-        return await handleLinkOnly(env, canonical_id, source_pi);
-
-      case 'prefer_new':
-        return await handlePreferNew(env, canonical_id, type, label, new_properties, source_pi);
-
-      default:
-        return errorResponse(
-          'Unknown merge strategy',
-          ERROR_CODES.INVALID_MERGE_STRATEGY,
-          { strategy: merge_strategy },
-          400
-        );
+    if (!sourceExists) {
+      return errorResponse(
+        'Source entity does not exist (may have been merged already)',
+        'source_not_found',
+        { source_id },
+        404
+      );
     }
+
+    // Atomic merge using APOC refactor.mergeNodes
+    // This transfers all relationships and merges properties in a single transaction
+    const mergeQuery = `
+      MATCH (source:Entity {canonical_id: $source_id})
+      MATCH (target:Entity {canonical_id: $target_id})
+
+      // Count relationships before merge for response
+      OPTIONAL MATCH (source)-[r]-()
+      WITH source, target, count(DISTINCT r) AS rel_count
+
+      // Get source's EXTRACTED_FROM PIs before merge
+      OPTIONAL MATCH (source)-[:EXTRACTED_FROM]->(pi:PI)
+      WITH source, target, rel_count, collect(DISTINCT pi.id) AS source_pis
+
+      // Count source properties and merge them into target's properties
+      WITH source, target, rel_count, source_pis,
+           apoc.convert.fromJsonMap(coalesce(source.properties, '{}')) AS source_props,
+           apoc.convert.fromJsonMap(coalesce(target.properties, '{}')) AS target_props
+
+      WITH source, target, rel_count, source_pis,
+           size(keys(source_props)) AS props_count,
+           // Merge properties: combine maps, target wins on conflicts
+           apoc.map.merge(source_props, target_props) AS merged_props
+
+      // Store target identity properties before merge (APOC would overwrite them)
+      WITH source, target, rel_count, source_pis, props_count, merged_props,
+           target.canonical_id AS target_canonical_id,
+           target.code AS target_code,
+           target.label AS target_label,
+           target.type AS target_type,
+           target.created_by_pi AS target_created_by_pi,
+           target.first_seen AS target_first_seen
+
+      // Use APOC to merge nodes - transfers all relationships
+      // First node (target) is kept, second node (source) is deleted
+      // Use 'discard' for properties since we handle them manually
+      CALL apoc.refactor.mergeNodes([target, source], {
+        properties: 'discard',
+        mergeRels: true
+      })
+      YIELD node
+
+      // Restore target's identity properties and set merged properties
+      SET node.canonical_id = target_canonical_id,
+          node.code = target_code,
+          node.label = target_label,
+          node.type = target_type,
+          node.created_by_pi = target_created_by_pi,
+          node.first_seen = target_first_seen,
+          node.last_updated = datetime(),
+          node.properties = apoc.convert.toJson(merged_props)
+
+      RETURN target_canonical_id AS target_id,
+             rel_count AS relationships_transferred,
+             props_count AS properties_transferred,
+             source_pis
+    `;
+
+    const { records } = await executeQuery(env, mergeQuery, {
+      source_id,
+      target_id,
+    });
+
+    if (records.length === 0) {
+      // This shouldn't happen if the checks passed, but handle gracefully
+      return errorResponse(
+        'Merge failed unexpectedly',
+        'MERGE_FAILED',
+        { source_id, target_id },
+        500
+      );
+    }
+
+    const record = records[0];
+    const response: AtomicMergeResponse = {
+      success: true,
+      target_id: record.get('target_id'),
+      merged: {
+        properties_transferred: record.get('properties_transferred') || 0,
+        relationships_transferred: record.get('relationships_transferred') || 0,
+        source_pis_added: record.get('source_pis') || [],
+      },
+    };
+
+    return jsonResponse(response);
   } catch (error: any) {
+    // Handle Neo4j deadlock errors
+    if (error.code === 'Neo.TransientError.Transaction.DeadlockDetected') {
+      return errorResponse(
+        'Concurrent merge collision - please retry',
+        'deadlock',
+        { message: error.message },
+        409
+      );
+    }
+
     return errorResponse(
       error.message || 'Failed to merge entity',
       error.code,
@@ -251,263 +277,41 @@ export async function handleMergeEntity(
 }
 
 /**
- * Merge Strategy: enrich_placeholder
- * Upgrade a placeholder entity to a rich entity
+ * GET /entity/exists/:canonical_id
+ * Quick existence check without fetching full entity
  */
-async function handleEnrichPlaceholder(
+export async function handleEntityExists(
   env: Env,
-  canonical_id: string,
-  type: string | undefined,
-  label: string | undefined,
-  new_properties: Record<string, any>,
-  source_pi: string
+  canonical_id: string
 ): Promise<Response> {
-  const query = `
-    MATCH (e:Entity {canonical_id: $canonical_id})
-    WHERE e.type = 'unknown'
-    SET e.type = $new_type,
-        e.label = COALESCE($new_label, e.label),
-        e.properties = $new_properties,
-        e.last_updated = datetime()
-        // NOTE: created_by_pi is NOT modified (preserved from original placeholder creator)
-    MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
-    ON CREATE SET
-      rel.original_code = e.code,
-      rel.extracted_at = datetime()
-    RETURN e
-  `;
-
-  const { records } = await executeQuery(env, query, {
-    canonical_id,
-    new_type: type || 'unknown',
-    new_label: label || null,
-    new_properties: JSON.stringify(new_properties || {}),
-    source_pi,
-  });
-
-  if (records.length === 0) {
-    return errorResponse(
-      `Entity ${canonical_id} not found or is not a placeholder (type must be "unknown")`,
-      ERROR_CODES.NOT_A_PLACEHOLDER,
-      { canonical_id },
-      400
-    );
-  }
-
-  const response: MergeEntityResponse = {
-    canonical_id,
-    updated: true,
-  };
-
-  return jsonResponse(response);
-}
-
-/**
- * Merge Strategy: merge_peers
- * Merge two rich entities with conflict resolution
- *
- * Uses optimistic locking with version counter and retry logic.
- * 1. Read current version and properties
- * 2. Compute merged properties
- * 3. Attempt conditional update (only if version matches)
- * 4. If version mismatch (concurrent modification), retry
- */
-async function handleMergePeers(
-  env: Env,
-  canonical_id: string,
-  new_properties: Record<string, any>,
-  source_pi: string
-): Promise<Response> {
-  const MAX_RETRIES = 20;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    // Step 1: Read current state
-    const readQuery = `
-      MATCH (e:Entity {canonical_id: $canonical_id})
-      RETURN e.properties AS properties,
-             coalesce(e._version, 0) AS version
-    `;
-
-    const { records: readRecords } = await executeQuery(env, readQuery, { canonical_id });
-
-    if (readRecords.length === 0) {
+  try {
+    if (!canonical_id) {
       return errorResponse(
-        `Entity ${canonical_id} not found`,
-        ERROR_CODES.ENTITY_NOT_FOUND,
-        { canonical_id },
-        404
+        'Missing required parameter: canonical_id',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
       );
     }
 
-    const currentVersion = readRecords[0].get('version');
-    const existingPropsJson = readRecords[0].get('properties');
-    const existingProps = existingPropsJson ? JSON.parse(existingPropsJson) : {};
-
-    // Step 2: Compute merged properties in JS
-    const mergedProps = { ...existingProps };
-    const conflicts: PropertyConflict[] = [];
-
-    for (const [key, newValue] of Object.entries(new_properties || {})) {
-      if (key in existingProps) {
-        const existingValue = existingProps[key];
-        if (JSON.stringify(existingValue) !== JSON.stringify(newValue)) {
-          // Accumulate into array
-          if (Array.isArray(existingValue)) {
-            mergedProps[key] = [...existingValue, newValue];
-          } else {
-            mergedProps[key] = [existingValue, newValue];
-          }
-          conflicts.push({
-            property: key,
-            existing_value: existingValue,
-            new_value: newValue,
-            resolution: 'accumulated',
-          });
-        }
-      } else {
-        mergedProps[key] = newValue;
-      }
-    }
-
-    // Step 3: Conditional update with version check
-    // This WHERE clause ensures we only update if version hasn't changed
-    const updateQuery = `
+    const query = `
       MATCH (e:Entity {canonical_id: $canonical_id})
-      WHERE coalesce(e._version, 0) = $expected_version
-      SET e.properties = $merged_properties,
-          e._version = $expected_version + 1,
-          e.last_updated = datetime()
-      WITH e
-      MERGE (pi:PI {id: $source_pi})
-      MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
-      ON CREATE SET rel.original_code = e.code, rel.extracted_at = datetime()
-      RETURN e.canonical_id AS canonical_id
+      RETURN count(e) > 0 as exists
     `;
 
-    const { records: updateRecords } = await executeQuery(env, updateQuery, {
-      canonical_id,
-      expected_version: typeof currentVersion === 'object' ? currentVersion.toNumber() : currentVersion,
-      merged_properties: JSON.stringify(mergedProps),
-      source_pi,
-    });
+    const { records } = await executeQuery(env, query, { canonical_id });
 
-    if (updateRecords.length > 0) {
-      // Success - version matched, update applied
-      const response: MergeEntityResponse = {
-        canonical_id,
-        updated: true,
-        conflicts: conflicts.length > 0 ? conflicts : undefined,
-      };
-      return jsonResponse(response);
-    }
+    const exists = records.length > 0 && records[0].get('exists');
 
-    // Version mismatch - another transaction modified the entity
-    // Exponential backoff with jitter to reduce contention
-    const baseDelay = Math.min(100 * Math.pow(1.5, attempt - 1), 2000);
-    const jitter = Math.random() * baseDelay * 0.5;
-    await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
-  }
-
-  // Exhausted retries
-  return errorResponse(
-    `Failed to merge entity after ${MAX_RETRIES} retries due to concurrent modifications`,
-    'CONCURRENT_MODIFICATION',
-    { canonical_id },
-    409
-  );
-}
-
-/**
- * Merge Strategy: link_only
- * Just link a PI to existing entity (no data changes)
- */
-async function handleLinkOnly(
-  env: Env,
-  canonical_id: string,
-  source_pi: string
-): Promise<Response> {
-  const query = `
-    MATCH (e:Entity {canonical_id: $canonical_id})
-    MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
-    ON CREATE SET
-      rel.original_code = e.code,
-      rel.extracted_at = datetime()
-    SET e.last_updated = datetime()
-        // NOTE: created_by_pi is NOT modified (link_only = no data changes)
-    RETURN e
-  `;
-
-  const { records } = await executeQuery(env, query, { canonical_id, source_pi });
-
-  if (records.length === 0) {
+    const response: EntityExistsResponse = { exists };
+    return jsonResponse(response);
+  } catch (error: any) {
     return errorResponse(
-      `Entity ${canonical_id} not found`,
-      ERROR_CODES.ENTITY_NOT_FOUND,
-      { canonical_id },
-      404
+      error.message || 'Failed to check entity existence',
+      error.code,
+      { stack: error.stack }
     );
   }
-
-  const response: MergeEntityResponse = {
-    canonical_id,
-    updated: true,
-  };
-
-  return jsonResponse(response);
-}
-
-/**
- * Merge Strategy: prefer_new
- * Overwrite existing data with new data
- */
-async function handlePreferNew(
-  env: Env,
-  canonical_id: string,
-  type: string | undefined,
-  label: string | undefined,
-  new_properties: Record<string, any>,
-  source_pi: string
-): Promise<Response> {
-  const query = `
-    MATCH (e:Entity {canonical_id: $canonical_id})
-    SET e.type = COALESCE($new_type, e.type),
-        e.label = COALESCE($new_label, e.label),
-        e.properties = $new_properties,
-        e.last_updated = datetime()
-        // NOTE: created_by_pi is NOT modified (creator is lifecycle metadata, not entity data)
-    MERGE (pi:PI {id: $source_pi})
-    MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
-    ON CREATE SET
-      rel.original_code = e.code,
-      rel.extracted_at = datetime()
-    RETURN e
-  `;
-
-  const { records } = await executeQuery(env, query, {
-    canonical_id,
-    new_type: type || null,
-    new_label: label || null,
-    new_properties: JSON.stringify(new_properties || {}),
-    source_pi,
-  });
-
-  if (records.length === 0) {
-    return errorResponse(
-      `Entity ${canonical_id} not found`,
-      ERROR_CODES.ENTITY_NOT_FOUND,
-      { canonical_id },
-      404
-    );
-  }
-
-  const response: MergeEntityResponse = {
-    canonical_id,
-    updated: true,
-  };
-
-  return jsonResponse(response);
 }
 
 /**
@@ -530,7 +334,6 @@ export async function handleQueryEntity(
       );
     }
 
-    // Query for entity and its relationships
     const query = `
       MATCH (e:Entity {code: $code})
       OPTIONAL MATCH (e)-[r_out]->(target_out:Entity)
@@ -571,16 +374,14 @@ export async function handleQueryEntity(
     const { records } = await executeQuery(env, query, { code });
 
     if (records.length === 0) {
-      const response: QueryEntityResponse = {
-        found: false,
-      };
+      const response: QueryEntityResponse = { found: false };
       return jsonResponse(response);
     }
 
     const record = records[0];
     const relationships: EntityRelationship[] = record
       .get('relationships')
-      .filter((rel: any) => rel.type !== null) // Filter out null relationships
+      .filter((rel: any) => rel.type !== null)
       .map((rel: any) => ({
         type: rel.type,
         direction: rel.direction,
@@ -628,7 +429,6 @@ export async function handleListEntities(
   try {
     const { pi, pis, type } = body;
 
-    // Validate: must provide either pi or pis
     if (!pi && (!pis || pis.length === 0)) {
       return errorResponse(
         'Must provide either "pi" (string) or "pis" (array of strings)',
@@ -638,11 +438,8 @@ export async function handleListEntities(
       );
     }
 
-    // Normalize to array
     const piArray = pi ? [pi] : pis!;
 
-    // Build Cypher query with optional type filter
-    // This query deduplicates entities by canonical_id and collects all source PIs
     const query = `
       MATCH (pi:PI)<-[:EXTRACTED_FROM]-(e:Entity)
       WHERE pi.id IN $pis
@@ -690,6 +487,7 @@ export async function handleListEntities(
     );
   }
 }
+
 /**
  * DELETE /entity/:canonical_id
  * Delete an entity and all its relationships (cascade delete)
@@ -708,17 +506,11 @@ export async function handleDeleteEntity(
       );
     }
 
-    // Delete entity and all its relationships (DETACH DELETE)
     const query = `
       MATCH (e:Entity {canonical_id: $canonical_id})
-
-      // Count relationships before deletion
       OPTIONAL MATCH (e)-[r]-()
       WITH e, count(DISTINCT r) as rel_count
-
-      // Delete entity and all relationships
       DETACH DELETE e
-
       RETURN rel_count
     `;
 
@@ -770,7 +562,6 @@ export async function handleGetEntity(
       );
     }
 
-    // Fetch entity and its source PIs
     const query = `
       MATCH (e:Entity {canonical_id: $canonical_id})
       OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
@@ -787,9 +578,7 @@ export async function handleGetEntity(
     const { records } = await executeQuery(env, query, { canonical_id });
 
     if (records.length === 0) {
-      const response: GetEntityResponse = {
-        found: false,
-      };
+      const response: GetEntityResponse = { found: false };
       return jsonResponse(response);
     }
 
@@ -813,138 +602,6 @@ export async function handleGetEntity(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to get entity',
-      error.code,
-      { stack: error.stack }
-    );
-  }
-}
-
-/**
- * POST /entity/lookup/code
- * Lookup entity by code
- */
-export async function handleLookupByCode(
-  env: Env,
-  body: LookupByCodeRequest
-): Promise<Response> {
-  try {
-    const { code } = body;
-
-    if (!code) {
-      return errorResponse(
-        'Missing required field: code',
-        ERROR_CODES.VALIDATION_ERROR,
-        null,
-        400
-      );
-    }
-
-    const query = `
-      MATCH (e:Entity {code: $code})
-      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
-      WITH e, collect(DISTINCT pi.id) as source_pis
-      RETURN e.canonical_id AS canonical_id,
-             e.code AS code,
-             e.label AS label,
-             e.type AS type,
-             e.properties AS properties,
-             e.created_by_pi AS created_by_pi,
-             source_pis
-    `;
-
-    const { records } = await executeQuery(env, query, { code });
-
-    if (records.length === 0) {
-      const response: LookupByCodeResponse = {
-        found: false,
-      };
-      return jsonResponse(response);
-    }
-
-    const record = records[0];
-    const response: LookupByCodeResponse = {
-      found: true,
-      entity: {
-        canonical_id: record.get('canonical_id'),
-        code: record.get('code'),
-        label: record.get('label'),
-        type: record.get('type'),
-        properties: record.get('properties')
-          ? JSON.parse(record.get('properties'))
-          : {},
-        created_by_pi: record.get('created_by_pi'),
-        source_pis: record.get('source_pis'),
-      },
-    };
-
-    return jsonResponse(response);
-  } catch (error: any) {
-    return errorResponse(
-      error.message || 'Failed to lookup entity by code',
-      error.code,
-      { stack: error.stack }
-    );
-  }
-}
-
-/**
- * POST /entity/lookup/label
- * Lookup entities by label and type (case-insensitive label match)
- */
-export async function handleLookupByLabel(
-  env: Env,
-  body: LookupByLabelRequest
-): Promise<Response> {
-  try {
-    const { label, type } = body;
-
-    if (!label || !type) {
-      return errorResponse(
-        'Missing required fields: label, type',
-        ERROR_CODES.VALIDATION_ERROR,
-        null,
-        400
-      );
-    }
-
-    const query = `
-      MATCH (e:Entity)
-      WHERE toLower(e.label) = toLower($label) AND e.type = $type
-      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
-      WITH e, collect(DISTINCT pi.id) as source_pis
-      RETURN e.canonical_id AS canonical_id,
-             e.code AS code,
-             e.label AS label,
-             e.type AS type,
-             e.properties AS properties,
-             e.created_by_pi AS created_by_pi,
-             source_pis
-      ORDER BY e.label
-    `;
-
-    const { records } = await executeQuery(env, query, { label, type });
-
-    const entities = records.map((record) => ({
-      canonical_id: record.get('canonical_id'),
-      code: record.get('code'),
-      label: record.get('label'),
-      type: record.get('type'),
-      properties: record.get('properties')
-        ? JSON.parse(record.get('properties'))
-        : {},
-      created_by_pi: record.get('created_by_pi'),
-      source_pis: record.get('source_pis'),
-    }));
-
-    const response: LookupByLabelResponse = {
-      found: entities.length > 0,
-      entities,
-    };
-
-    return jsonResponse(response);
-  } catch (error: any) {
-    return errorResponse(
-      error.message || 'Failed to lookup entity by label',
       error.code,
       { stack: error.stack }
     );

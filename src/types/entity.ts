@@ -15,57 +15,24 @@ export interface CreateEntityRequest {
 }
 
 /**
- * Merge strategy options for entity merging
+ * Request for atomic entity merge (absorb source into target)
  */
-export type MergeStrategy =
-  | 'enrich_placeholder'   // Upgrade unknown→typed, empty→propertied
-  | 'merge_peers'          // Merge two rich entities with conflict resolution
-  | 'link_only'            // Just add PI to EXTRACTED_FROM (no data changes)
-  | 'prefer_new';          // Overwrite with incoming data
-
-/**
- * Enrichment data for entity merging
- */
-export interface EnrichmentData {
-  type?: string;                        // For upgrading placeholders
-  label?: string;                       // For refining labels
-  new_properties: Record<string, any>;
-  merge_strategy: MergeStrategy;
+export interface AtomicMergeRequest {
+  source_id: string;  // Entity to be absorbed and deleted
+  target_id: string;  // Entity to keep (receives all relationships)
 }
 
 /**
- * Request to merge entity data with existing entity
+ * Response from atomic entity merge
  */
-export interface MergeEntityRequest {
-  canonical_id: string;
-  enrichment_data: EnrichmentData;
-  source_pi: string;
-
-  /**
-   * Optional: If provided, absorb relationships from this duplicate entity using APOC.
-   * The duplicate entity will be deleted automatically after relationships are transferred.
-   */
-  absorb_duplicate_id?: string;
-}
-
-/**
- * Property conflict information
- */
-export interface PropertyConflict {
-  property: string;
-  existing_value: any;
-  new_value: any;
-  resolution: 'accumulated' | 'kept_existing' | 'preferred_new';
-}
-
-/**
- * Response from entity merge operation
- */
-export interface MergeEntityResponse {
-  canonical_id: string;
-  updated: boolean;
-  conflicts?: PropertyConflict[];
-  absorbed_duplicate?: string;  // ID of absorbed entity (if absorb_duplicate_id was provided)
+export interface AtomicMergeResponse {
+  success: boolean;
+  target_id: string;
+  merged: {
+    properties_transferred: number;
+    relationships_transferred: number;
+    source_pis_added: string[];
+  };
 }
 
 /**
@@ -162,48 +129,8 @@ export interface GetEntityResponse {
 }
 
 /**
- * Request to lookup entity by code
+ * Response from entity exists check
  */
-export interface LookupByCodeRequest {
-  code: string;
-}
-
-/**
- * Response from lookup by code
- */
-export interface LookupByCodeResponse {
-  found: boolean;
-  entity?: {
-    canonical_id: string;
-    code: string;
-    label: string;
-    type: string;
-    properties: Record<string, any>;
-    created_by_pi: string;
-    source_pis: string[];
-  };
-}
-
-/**
- * Request to lookup entity by label and type
- */
-export interface LookupByLabelRequest {
-  label: string;
-  type: string;
-}
-
-/**
- * Response from lookup by label (can return multiple matches)
- */
-export interface LookupByLabelResponse {
-  found: boolean;
-  entities: Array<{
-    canonical_id: string;
-    code: string;
-    label: string;
-    type: string;
-    properties: Record<string, any>;
-    created_by_pi: string;
-    source_pis: string[];
-  }>;
+export interface EntityExistsResponse {
+  exists: boolean;
 }

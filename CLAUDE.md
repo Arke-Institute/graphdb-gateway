@@ -27,7 +27,6 @@ npm test                     # Test Neo4j connectivity
 npm run test:neo4j          # Same as npm test
 npm run test:endpoints      # Test API endpoints locally (requires dev server running)
 npm run test:production     # Test production deployment
-npm run test:race           # Test concurrent operations for race conditions
 
 # Database utilities
 npm run populate            # Add sample data to Neo4j
@@ -82,7 +81,7 @@ src/
 │
 ├── handlers/             # Request handlers by domain
 │   ├── pi.ts            # PI creation and management
-│   ├── entity.ts        # Entity CRUD (create, merge, query, list, delete, get)
+│   ├── entity.ts        # Entity CRUD (create, merge, query, list, delete, get, exists)
 │   ├── hierarchy.ts     # Hierarchy lookups (find-in-hierarchy, entities/hierarchy)
 │   └── relationship.ts  # Relationship creation
 │
@@ -98,13 +97,6 @@ src/
     ├── response.ts      # jsonResponse, errorResponse, handleOptions
     └── validation.ts    # Input validation helpers
 ```
-
-**Benefits of this structure**:
-- Separation of concerns (each file focuses on one domain)
-- Easier testing (can test handlers independently)
-- Better type organization (types grouped by feature)
-- Reusable utilities (response helpers, validation)
-- Scalability (easy to add new endpoints)
 
 ### Cloudflare Workers Pattern
 
@@ -196,11 +188,6 @@ export async function executeQuery(env, query, params) {
 
 ### Important Conventions
 
-**Placeholder Entities**:
-- `type: "unknown"` indicates an unresolved placeholder entity
-- Empty `properties: "{}"` for placeholders without data
-- Placeholders are created during entity linking when a referenced entity hasn't been fully resolved yet
-
 **Properties Storage**:
 - All `properties` fields are JSON strings, not native Neo4j maps
 - Always use `JSON.stringify()` when writing, `JSON.parse()` when reading
@@ -208,20 +195,9 @@ export async function executeQuery(env, query, params) {
 
 **Entity Creator Tracking (`created_by_pi`)**:
 - `created_by_pi` tracks which PI first created the canonical entity record
-- Set once during `/entity/create`, never modified by any merge operation
-- **Immutable** across all merge strategies (enrich_placeholder, merge_peers, link_only, prefer_new)
+- Set once during `/entity/create`, never modified
 - Different from `source_pis` (via EXTRACTED_FROM relationships), which tracks all PIs that mention this entity
 - Provides O(1) lookup of entity creator (faster than relationship traversal)
-- Use cases:
-  - Auditing: "which pipeline run created this entity?"
-  - Debugging: trace entity lifecycle back to origin
-  - Future: permissions, quotas, conflict resolution based on creator
-
-**Semantics**:
-- Creator = "who created the canonical entity record" (even if it was a placeholder)
-- When enriching a placeholder, `created_by_pi` remains the placeholder creator
-- When merging peers, `created_by_pi` remains the first entity's creator
-- EXTRACTED_FROM relationships track the full contribution history
 
 **Concurrency Safety**:
 - Entity creation uses `MERGE` on `canonical_id` (not `CREATE`) for atomic idempotency
@@ -230,8 +206,6 @@ export async function executeQuery(env, query, params) {
   - First request: creates the entity (ON CREATE)
   - Subsequent requests: match existing entity (ON MATCH)
   - All requests succeed with HTTP 200 (idempotent behavior)
-- This pattern eliminates race conditions where multiple workers try to create the same entity
-- See `tests/test-concurrent-race.js` for comprehensive concurrency tests
 
 ## API Endpoint Patterns
 
@@ -271,20 +245,12 @@ MATCH (object:Entity {canonical_id: rel.object_id})
 CREATE (subject)-[:RELATIONSHIP {...}]->(object)
 ```
 
-**Deduplication with COLLECT**:
-```cypher
-MATCH (pi:PI)<-[:EXTRACTED_FROM]-(e:Entity)
-WHERE pi.id IN $pis
-WITH e, collect(DISTINCT pi.id) AS source_pis
-RETURN DISTINCT e.canonical_id, ..., source_pis
-```
-
 ## Entity Linking Architecture
 
 ### Division of Responsibilities
 
 **Orchestrator** (external service calling this API):
-- Decides whether to merge, create, or enrich entities
+- Decides whether to merge or create entities
 - Semantic similarity scoring (via Pinecone)
 - Resolves ALL entity references from properties
 - Generates canonical IDs (UUIDs)
@@ -292,32 +258,12 @@ RETURN DISTINCT e.canonical_id, ..., source_pis
 
 **GraphDB Gateway** (this service):
 - Simple storage and retrieval of entities
-- Execute property merging with conflict resolution
+- Atomic entity merging (absorb source into target)
 - Track source PIs via EXTRACTED_FROM relationships
 - Query parent/child entity hierarchies
 - Database constraints and validation
 
 **Key Principle**: The orchestrator handles all decision-making logic; the Graph API is a data layer.
-
-### Entity Reference Resolution
-
-Entity references can appear in properties:
-```json
-{
-  "properties": {
-    "when": {"type": "entity_ref", "code": "date_1864"}
-  }
-}
-```
-
-**Important**: The orchestrator resolves these references BEFORE calling `/entity/create`:
-1. Orchestrator extracts entity refs from properties
-2. Resolves each reference to a canonical_id
-3. Removes entity refs from properties (creates "clean" properties)
-4. Calls `/entity/create` with clean properties
-5. Calls `/relationships/create` separately for the resolved references
-
-**The Graph API does NOT auto-resolve entity references** - it only stores what it receives.
 
 ## API Endpoints
 
@@ -336,63 +282,62 @@ Entity references can appear in properties:
 - Creates EXTRACTED_FROM relationship to source PI
 - **Idempotent**: Uses MERGE on canonical_id to handle concurrent requests safely
 - If entity exists, updates `last_updated` timestamp and adds source PI relationship
-- All concurrent requests with same canonical_id succeed (no 409 errors)
-- First request creates (ON CREATE), subsequent requests match (ON MATCH)
 
-**POST /entity/merge** - Merge entity with existing entity
-- Supports 4 merge strategies:
-  - `enrich_placeholder`: Upgrade placeholder (type="unknown") to rich entity
-  - `merge_peers`: Merge two rich entities with conflict resolution (accumulates values into arrays)
-  - `link_only`: Just add source PI relationship, no data changes
-  - `prefer_new`: Overwrite existing data with new data
-- **Optional**: `absorb_duplicate_id` parameter to absorb a duplicate entity using APOC
-  - When provided, uses `apoc.refactor.mergeNodes` to atomically:
-    - Transfer all relationships from duplicate to canonical entity
-    - Delete the duplicate entity
-    - Preserve all relationship properties
-  - Properties are kept from canonical entity (not merged)
-  - Used by orchestrator cleanup phase for entity deduplication
-- Request body example (with absorption):
+**POST /entity/merge** - Atomic merge: absorb source entity into target
+- Absorbs source entity into target entity
+- Transfers ALL relationships from source to target
+- Merges properties
+- Deletes source entity after transfer
+- **Atomic**: Either completes fully or rolls back (Neo4j transaction)
+- Request:
   ```json
   {
-    "canonical_id": "canonical-entity-id",
-    "enrichment_data": {
-      "new_properties": {},
-      "merge_strategy": "merge_peers"
-    },
-    "source_pi": "pi-id",
-    "absorb_duplicate_id": "duplicate-entity-id"  // Optional
+    "source_id": "uuid-of-entity-to-delete",
+    "target_id": "uuid-of-entity-to-keep"
   }
   ```
-- Response (with absorption):
-  ```json
-  {
-    "canonical_id": "...",
-    "updated": true,
-    "absorbed_duplicate": "duplicate-entity-id"
-  }
-  ```
-- Returns conflict information when merging peers (without absorption)
-
-**DELETE /entity/:canonical_id** - Delete entity and all relationships (cascade delete)
-- Deletes entity AND all its relationships using `DETACH DELETE`
-- No safety checks - completely removes entity from graph
-- Used for cleanup operations where full removal is intended
-- Response:
+- Response (Success):
   ```json
   {
     "success": true,
-    "canonical_id": "...",
-    "deleted": true,
-    "relationship_count": 5  // Number of relationships deleted
+    "target_id": "uuid-of-entity-to-keep",
+    "merged": {
+      "properties_transferred": 5,
+      "relationships_transferred": 12,
+      "source_pis_added": ["pi1", "pi2"]
+    }
+  }
+  ```
+- Response (Target Not Found): HTTP 404
+  ```json
+  {
+    "success": false,
+    "error": "target_not_found",
+    "message": "Target entity does not exist"
+  }
+  ```
+- Response (Source Not Found): HTTP 404
+  ```json
+  {
+    "success": false,
+    "error": "source_not_found",
+    "message": "Source entity does not exist (may have been merged already)"
+  }
+  ```
+
+**GET /entity/exists/:canonical_id** - Quick existence check
+- Returns whether an entity exists without fetching full data
+- Used before merge operations to verify target exists
+- Response:
+  ```json
+  {
+    "exists": true
   }
   ```
 
 **GET /entity/:canonical_id** - Get entity by canonical_id
 - Fetches entity details by canonical_id
 - Returns entity with properties and source_pis
-- Used by orchestrator cleanup phase to fetch entity details for embedding generation
-- Request: GET /entity/{canonical_id}
 - Response on success:
   ```json
   {
@@ -415,69 +360,17 @@ Entity references can appear in properties:
   }
   ```
 
-**POST /entity/lookup/code** - Lookup entity by code
-- Fast lookup using indexed code field
-- Request:
-  ```json
-  {
-    "code": "nick_chimicles"
-  }
-  ```
-- Response on success:
-  ```json
-  {
-    "found": true,
-    "entity": {
-      "canonical_id": "...",
-      "code": "nick_chimicles",
-      "label": "Nick Chimicles",
-      "type": "person",
-      "properties": {...},
-      "created_by_pi": "...",
-      "source_pis": ["pi1", "pi2", ...]
-    }
-  }
-  ```
-- Response when not found:
-  ```json
-  {
-    "found": false
-  }
-  ```
-
-**POST /entity/lookup/label** - Lookup entities by label and type
-- Case-insensitive label matching
-- Requires both label and type
-- Can return multiple entities (if same label exists)
-- Request:
-  ```json
-  {
-    "label": "Nick Chimicles",
-    "type": "person"
-  }
-  ```
+**DELETE /entity/:canonical_id** - Delete entity and all relationships (cascade delete)
+- Deletes entity AND all its relationships using `DETACH DELETE`
+- No safety checks - completely removes entity from graph
+- Used for cleanup operations where full removal is intended
 - Response:
   ```json
   {
-    "found": true,
-    "entities": [
-      {
-        "canonical_id": "...",
-        "code": "nick_chimicles",
-        "label": "Nick Chimicles",
-        "type": "person",
-        "properties": {...},
-        "created_by_pi": "...",
-        "source_pis": ["pi1", "pi2", ...]
-      }
-    ]
-  }
-  ```
-- Response when not found:
-  ```json
-  {
-    "found": false,
-    "entities": []
+    "success": true,
+    "canonical_id": "...",
+    "deleted": true,
+    "relationship_count": 5
   }
   ```
 
@@ -566,145 +459,66 @@ Entity references can appear in properties:
 - Deletes all nodes and relationships
 - **Destructive operation** - use only for testing
 - Returns count of deleted nodes and relationships
-- Used for cleanup between test runs
 
-### Merge Strategies Explained
+## Reconciliation Workflow
 
-#### enrich_placeholder
-**When to use**: Upgrading a placeholder to a rich entity
+The reconciliation phase handles merging duplicate entities discovered via Pinecone similarity search.
 
-```typescript
-// Before: { type: "unknown", properties: {} }
-// After:  { type: "person", properties: { role: "researcher" } }
+**Operation Sequence**:
+```
+1. Check target exists
+   GET /entity/exists/{target_id}
+   └─ If false: return, try next candidate
+
+2. Decide whether to merge (similarity check / AI review)
+   └─ If no: return, try next candidate
+
+3. Execute merge
+   POST /entity/merge
+   {
+     "source_id": "my-uuid",
+     "target_id": "their-uuid"
+   }
+   └─ If 404 (target_not_found): retry from step 1
+   └─ If success: proceed to step 4
+
+4. Delete from Pinecone
+   DELETE /pinecone/vectors
+   {
+     "ids": ["my-uuid"]
+   }
+
+Done: Entity merged successfully
 ```
 
-**Behavior**:
-- Validates entity is a placeholder (type === "unknown")
-- Updates type to new type
-- Replaces empty properties with new properties
-- Adds source PI relationship
+**Race Condition Handling**:
+- Neo4j uses pessimistic locking on nodes during writes
+- If merge returns 404, target was deleted by concurrent operation
+- Retry with backoff → Pinecone search returns new candidate
+- Eventually one entity survives
 
-#### merge_peers
-**When to use**: Merging two entities that both have real data
+**Consistency Guarantees**:
+| Operation | Consistency Level |
+|-----------|-------------------|
+| Neo4j merge | Strong (ACID transaction) |
+| Neo4j exists check | Strong (read committed) |
+| Pinecone search | Eventual (may return stale data) |
+| Pinecone delete | Eventual (deleted vectors may still appear briefly) |
 
-```typescript
-// Existing: { properties: { role: "president" } }
-// New:      { properties: { role: "general", location: "Virginia" } }
-// Result:   { properties: { role: ["president", "general"], location: "Virginia" } }
-```
+**Key Insight**: Neo4j is the source of truth. Pinecone inconsistency is handled by always verifying existence in Neo4j before merge.
 
-**Behavior**:
-- For conflicting properties: accumulate into array
-- For new properties: add them
-- Returns conflict details in response
-- Adds source PI relationship
-
-**Concurrency Safety (Optimistic Locking)**:
-- Uses `_version` field on entities to detect concurrent modifications
-- Pattern: read version → compute merge → conditional write (only if version unchanged)
-- If version mismatch detected, retries with exponential backoff (up to 20 attempts)
-- Backoff: `100ms * 1.5^attempt` (capped at 2s) + random jitter
-- Returns 409 if all retries exhausted (very rare under normal load)
-- Why not single-query APOC? Neo4j's READ COMMITTED isolation allows concurrent transactions to read stale data, so optimistic locking is required regardless
-- Test: `npm run test:race` and `tests/test-merge-peers-concurrent.js`
-
-#### link_only
-**When to use**: Just linking a PI to existing entity
-
-**Behavior**:
-- NO data changes (type, label, properties unchanged)
-- Only adds EXTRACTED_FROM relationship
-- Updates timestamp
-
-#### prefer_new
-**When to use**: Overwriting existing data (rarely used)
-
-**Behavior**:
-- Replaces properties with new ones
-- Updates type/label if provided
-- Adds source PI relationship
-
-### Cleanup Phase Workflow
-
-The cleanup phase handles merging duplicate entities discovered after Pinecone propagation. This is the **final** phase of entity linking.
-
-**Workflow**:
-1. Orchestrator identifies duplicate entities via Pinecone similarity search
-2. For each duplicate pair:
-   - Call `POST /entity/merge` with `absorb_duplicate_id` to atomically transfer relationships and delete duplicate
-   - (Alternative) If the duplicate needs to be fully removed without merging, call `DELETE /entity/:canonical_id` directly
-
-**Example (merge with absorption using APOC)**:
-```typescript
-// Single API call to merge entities (using APOC mergeNodes)
-const mergeResult = await graphdb.mergeEntity({
-  canonical_id: canonicalEntity.canonical_id,     // Entity being kept
-  enrichment_data: {
-    new_properties: {},
-    merge_strategy: 'merge_peers'
-  },
-  source_pi: currentPI,
-  absorb_duplicate_id: duplicateEntity.canonical_id  // Entity being absorbed
-});
-
-// Result: duplicate entity is gone, all relationships transferred
-```
-
-**Example (direct delete)**:
-```typescript
-// For entities that just need to be removed completely
-await graphdb.deleteEntity(duplicateEntity.canonical_id);
-// Deletes entity + all relationships (cascade delete)
-```
-
-**Key Features**:
-- **Atomicity**: APOC mergeNodes operation is all-or-nothing (Neo4j transaction)
-- **Simplicity**: Single API call instead of two-step redirect + delete
-- **Battle-tested**: Uses Neo4j's official APOC library for node merging
-- **Provenance preservation**: EXTRACTED_FROM edges automatically transferred to canonical entity
-- **Relationship preservation**: All domain relationships transferred with properties intact
-- **Cascade delete**: DELETE operation removes entity and all relationships in one step
-
-**Error Handling**:
-- If merge with absorption fails mid-operation, Neo4j rolls back (nothing changed)
-- All operations return detailed error information for debugging
-
-**Performance**:
-- Simple merge (2-3 relationships): 50-100ms
-- Complex merge (10+ relationships): 200-300ms
-- Expected cleanup volume: 5-10 merges per orchestrator run
-
-### Performance Optimizations
+## Performance Optimizations
 
 **Database Indexes** (added via `npm run add-indexes`):
 - `entity_code_idx`: Index on Entity.code for fast hierarchy lookups
 - `entity_type_code_idx`: Composite index on (Entity.type, Entity.code) for filtered queries
-
-These indexes significantly improve performance for:
-- `/entity/find-in-hierarchy` (code lookups)
-- `/entities/hierarchy` (filtered queries)
-- Entity resolution during orchestration
-
-**Caching Strategy**:
-- Orchestrator caches parent/child entity indexes in SETUP phase
-- Uses `/entities/hierarchy` to bulk fetch entities once
-- Avoids redundant API calls during RESOLVING phase
 
 ## Testing Strategy
 
 **Test hierarchy**:
 1. Neo4j connectivity (`npm test`)
 2. Local endpoint tests (`npm run test:endpoints` - requires `npm run dev` in another terminal)
-3. Concurrent race condition tests (`npm run test:race` - validates MERGE-based idempotency)
-4. Production tests (`npm run test:production`)
-
-**Concurrency Tests** (`npm run test:race`):
-- Test 1: Concurrent entity creation with same canonical_id
-- Test 2: Read-check-create pattern validation
-- Test 3: Concurrent property merges on same entity
-- Test 4: Mixed read/write operations
-- Test 5: High-volume stress test (50 concurrent entities)
-- All tests validate that MERGE on canonical_id prevents duplicates
+3. Production tests (`npm run test:production`)
 
 **Sample data**:
 - Use `npm run populate` to add test data

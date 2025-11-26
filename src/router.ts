@@ -10,8 +10,7 @@ import {
   handleListEntities,
   handleDeleteEntity,
   handleGetEntity,
-  handleLookupByCode,
-  handleLookupByLabel,
+  handleEntityExists,
 } from './handlers/entity';
 import {
   handleFindInHierarchy,
@@ -42,8 +41,6 @@ const routes: RouteTable = {
   'POST /entity/create': handleCreateEntity,
   'POST /entity/merge': handleMergeEntity,
   'POST /entity/query': handleQueryEntity,
-  'POST /entity/lookup/code': handleLookupByCode,
-  'POST /entity/lookup/label': handleLookupByLabel,
   'POST /entity/find-in-hierarchy': handleFindInHierarchy,
   'POST /entities/list': handleListEntities,
   'POST /entities/hierarchy': handleGetEntitiesHierarchy,
@@ -62,8 +59,7 @@ const ENDPOINTS = [
   'POST /entity/create',
   'POST /entity/merge',
   'POST /entity/query',
-  'POST /entity/lookup/code',
-  'POST /entity/lookup/label',
+  'GET /entity/exists/:canonical_id',
   'GET /entity/:canonical_id',
   'DELETE /entity/:canonical_id',
   'POST /entity/find-in-hierarchy',
@@ -111,7 +107,23 @@ export async function handleRequest(
     }
   }
 
-  // Handle GET /entity/:canonical_id specially (URL parameter)
+  // Handle GET /entity/exists/:canonical_id (must check before /entity/:id)
+  if (request.method === 'GET' && path.startsWith('/entity/exists/')) {
+    const canonical_id = path.split('/entity/exists/')[1];
+    if (canonical_id) {
+      try {
+        return await handleEntityExists(env, canonical_id);
+      } catch (error: any) {
+        return errorResponse(
+          'Internal server error',
+          ERROR_CODES.INTERNAL_ERROR,
+          { message: error.message, stack: error.stack }
+        );
+      }
+    }
+  }
+
+  // Handle GET /entity/:canonical_id
   if (request.method === 'GET' && path.startsWith('/entity/')) {
     const canonical_id = path.split('/entity/')[1];
     if (canonical_id) {
@@ -127,7 +139,7 @@ export async function handleRequest(
     }
   }
 
-  // Handle DELETE /entity/:canonical_id specially (URL parameter)
+  // Handle DELETE /entity/:canonical_id
   if (request.method === 'DELETE' && path.startsWith('/entity/')) {
     const canonical_id = path.split('/entity/')[1];
     if (canonical_id) {
@@ -143,8 +155,7 @@ export async function handleRequest(
     }
   }
 
-  // Handle GET /relationships/:canonical_id specially (URL parameter)
-  // Must check before the static /relationships route
+  // Handle GET /relationships/:canonical_id (must check before /relationships)
   if (request.method === 'GET' && path.startsWith('/relationships/')) {
     const canonical_id = path.split('/relationships/')[1];
     if (canonical_id) {
@@ -165,7 +176,6 @@ export async function handleRequest(
   const handler = routes[routeKey];
 
   if (!handler) {
-    // Route not found
     return errorResponse(
       'Endpoint not found',
       ERROR_CODES.NOT_FOUND,

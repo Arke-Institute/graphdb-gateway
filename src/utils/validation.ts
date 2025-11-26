@@ -25,16 +25,3 @@ export function isPlaceholder(entity: {
     entity.type === 'unknown' && Object.keys(entity.properties).length === 0
   );
 }
-
-/**
- * Validate merge strategy
- */
-export function isValidMergeStrategy(strategy: string): boolean {
-  const validStrategies = [
-    'enrich_placeholder',
-    'merge_peers',
-    'link_only',
-    'prefer_new',
-  ];
-  return validStrategies.includes(strategy);
-}
