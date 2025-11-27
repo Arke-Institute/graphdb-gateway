@@ -4,12 +4,22 @@
 
 import { executeQuery } from '../neo4j';
 import { errorResponse, jsonResponse } from '../utils/response';
+import { ERROR_CODES } from '../constants';
 import { Env, SuccessResponse } from '../types';
+
+/**
+ * Pattern that matches "nuke all" queries:
+ * MATCH (n) DETACH DELETE n
+ * MATCH (x) DELETE x
+ * This catches queries that would delete ALL nodes without any filter.
+ */
+const MASS_DELETE_PATTERN = /MATCH\s*\(\s*(\w+)\s*\)\s*(DETACH\s+)?DELETE\s+\1/i;
 
 /**
  * POST /query
  * Execute a custom Cypher query
  * WARNING: Allows arbitrary queries - use with caution!
+ * SAFEGUARD: Blocks mass delete patterns (MATCH (n) DETACH DELETE n)
  */
 export async function handleCustomQuery(
   env: Env,
@@ -23,6 +33,16 @@ export async function handleCustomQuery(
         'Missing or invalid field: query (must be a non-empty string)',
         'VALIDATION_ERROR',
         null,
+        400
+      );
+    }
+
+    // Block mass delete patterns to prevent accidental data loss
+    if (MASS_DELETE_PATTERN.test(query)) {
+      return errorResponse(
+        'Mass delete blocked. This pattern would delete all nodes. Use /admin/clear-test-data for test cleanup or add filters to your query.',
+        ERROR_CODES.VALIDATION_ERROR,
+        { blocked_pattern: 'MATCH (n) [DETACH] DELETE n' },
         400
       );
     }
@@ -70,14 +90,18 @@ export async function handleCustomQuery(
 }
 
 /**
- * POST /admin/clear
- * Clear all data from the database (nodes and relationships)
- * WARNING: This is a destructive operation!
+ * POST /admin/clear-test-data
+ * Clear only test data from the database (nodes with 'test' in id/canonical_id)
+ * Safe to run in production - will not affect real data
  */
-export async function handleClearAllData(env: Env): Promise<Response> {
+export async function handleClearTestData(env: Env): Promise<Response> {
   try {
+    // Only delete nodes where id or canonical_id contains 'test'
+    // This protects production data while allowing test cleanup
     const query = `
       MATCH (n)
+      WHERE toString(n.id) CONTAINS 'test'
+         OR toString(n.canonical_id) CONTAINS 'test'
       DETACH DELETE n
       RETURN count(n) as deleted_count
     `;
@@ -88,18 +112,18 @@ export async function handleClearAllData(env: Env): Promise<Response> {
 
     const response: SuccessResponse = {
       success: true,
-      message: 'All data cleared successfully',
+      message: 'Test data cleared successfully',
       data: {
         deleted_nodes: deletedCount,
         deleted_relationships: summary.counters.updates().relationshipsDeleted,
-        cleared: true,
+        pattern: 'nodes with "test" in id or canonical_id',
       },
     };
 
     return jsonResponse(response);
   } catch (error: any) {
     return errorResponse(
-      error.message || 'Failed to clear data',
+      error.message || 'Failed to clear test data',
       error.code,
       { stack: error.stack }
     );

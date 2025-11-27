@@ -486,24 +486,20 @@ CREATE (subject)-[:RELATIONSHIP {...}]->(object)
   ```
 - Returns `{ found: false }` if entity not found
 
-**GET /relationships** - List all relationships
-- Returns all RELATIONSHIP edges in the database
-- Includes subject_id, predicate, object_id, properties, source_pi
-- Ordered by created_at descending
-- Used for debugging and testing
-
 ### Admin Operations
 
 **POST /query** - Execute custom Cypher query
 - Allows arbitrary Cypher queries for debugging/testing
 - Accepts `query` (required) and `params` (optional)
 - Returns results with Neo4j type conversions
-- **Use with caution** - no query validation
+- **Safeguard**: Mass delete patterns blocked (`MATCH (n) DETACH DELETE n`)
+- Filtered deletes are allowed (`MATCH (n:Entity {id: 'foo'}) DELETE n`)
 
-**POST /admin/clear** - Clear all data from database
-- Deletes all nodes and relationships
-- **Destructive operation** - use only for testing
-- Returns count of deleted nodes and relationships
+**POST /admin/clear-test-data** - Clear test data only
+- Only deletes nodes where `id` or `canonical_id` contains "test"
+- **Safe for production** - will not affect real data
+- Tests should use `test-` prefix in all IDs
+- Returns count of deleted test nodes and relationships
 
 ## Reconciliation Workflow
 

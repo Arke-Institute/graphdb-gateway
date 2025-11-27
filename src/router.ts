@@ -17,10 +17,9 @@ import { handleFindInLineage } from './handlers/hierarchy';
 import {
   handleCreateRelationships,
   handleMergeRelationships,
-  handleListRelationships,
   handleGetEntityRelationships,
 } from './handlers/relationship';
-import { handleClearAllData, handleCustomQuery } from './handlers/admin';
+import { handleClearTestData, handleCustomQuery } from './handlers/admin';
 import { errorResponse, handleOptions, jsonResponse } from './utils/response';
 import { ERROR_CODES, API_VERSION, SERVICE_NAME } from './constants';
 import { Env } from './types';
@@ -44,9 +43,8 @@ const routes: RouteTable = {
   'POST /entities/find-in-lineage': handleFindInLineage,
   'POST /relationships/create': handleCreateRelationships,
   'POST /relationships/merge': handleMergeRelationships,
-  'GET /relationships': (env: Env) => handleListRelationships(env),
   'POST /query': handleCustomQuery,
-  'POST /admin/clear': (env: Env) => handleClearAllData(env),
+  'POST /admin/clear-test-data': (env: Env) => handleClearTestData(env),
 };
 
 /**
@@ -66,9 +64,8 @@ const ENDPOINTS = [
   'POST /relationships/create',
   'POST /relationships/merge',
   'GET /relationships/:canonical_id',
-  'GET /relationships',
   'POST /query',
-  'POST /admin/clear',
+  'POST /admin/clear-test-data',
 ];
 
 /**

@@ -108,48 +108,6 @@ export async function handleGetEntityRelationships(
 }
 
 /**
- * GET /relationships
- * List all relationships in the database
- */
-export async function handleListRelationships(env: Env): Promise<Response> {
-  try {
-    const query = `
-      MATCH (subject:Entity)-[rel:RELATIONSHIP]->(object:Entity)
-      RETURN
-        subject.canonical_id as subject_id,
-        rel.predicate as predicate,
-        object.canonical_id as object_id,
-        rel.properties as properties,
-        rel.source_pi as source_pi,
-        rel.created_at as created_at
-      ORDER BY rel.created_at DESC
-    `;
-
-    const { records } = await executeQuery(env, query);
-
-    const relationships = records.map((record) => ({
-      subject_id: record.get('subject_id'),
-      predicate: record.get('predicate'),
-      object_id: record.get('object_id'),
-      properties: JSON.parse(record.get('properties') || '{}'),
-      source_pi: record.get('source_pi'),
-      created_at: record.get('created_at'),
-    }));
-
-    return jsonResponse({
-      relationships,
-      total_count: relationships.length,
-    });
-  } catch (error: any) {
-    return errorResponse(
-      error.message || 'Failed to list relationships',
-      error.code,
-      { stack: error.stack }
-    );
-  }
-}
-
-/**
  * POST /relationships/create
  * Batch create relationships between canonical entities
  */

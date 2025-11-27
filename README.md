@@ -352,26 +352,6 @@ Content-Type: application/json
 // Subsequent calls: Updates properties, prevents duplicates
 ```
 
-#### List All Relationships
-```http
-GET /relationships
-
-// Response
-{
-  "relationships": [
-    {
-      "subject_id": "uuid_123",
-      "predicate": "affiliated_with",
-      "object_id": "uuid_456",
-      "properties": {"since": "2020"},
-      "source_pi": "01KA1H53CP...",
-      "created_at": "2025-11-19T22:00:00Z"
-    }
-  ],
-  "total_count": 32
-}
-```
-
 ### Admin Operations
 
 #### Custom Query
@@ -395,9 +375,13 @@ Content-Type: application/json
 }
 ```
 
-#### Clear All Data
+**Safeguard:** Mass delete patterns are blocked to prevent accidental data loss:
+- `MATCH (n) DETACH DELETE n` ❌ Blocked
+- `MATCH (n:Entity {id: 'foo'}) DELETE n` ✓ Allowed (filtered)
+
+#### Clear Test Data
 ```http
-POST /admin/clear
+POST /admin/clear-test-data
 Content-Type: application/json
 
 {}
@@ -405,14 +389,16 @@ Content-Type: application/json
 // Response
 {
   "success": true,
-  "message": "All data cleared successfully",
+  "message": "Test data cleared successfully",
   "data": {
-    "deleted_nodes": 37,
-    "deleted_relationships": 70,
-    "cleared": true
+    "deleted_nodes": 16,
+    "deleted_relationships": 12,
+    "pattern": "nodes with \"test\" in id or canonical_id"
   }
 }
 ```
+
+**Safety:** Only deletes nodes where `id` or `canonical_id` contains "test". Safe to run in production - will not affect real data. Tests should use `test-` prefix in IDs.
 
 ## Architecture
 
@@ -628,6 +614,7 @@ These indexes significantly improve:
 
 - **[Setup Guide](docs/SETUP.md)** - Complete setup and configuration
 - **[Quick Start](docs/QUICK_START.md)** - Quick reference and examples
+- **[Testing Guide](docs/TESTING.md)** - Test data conventions and cleanup
 - **[Deployment](docs/DEPLOYMENT.md)** - Production deployment details
 - **[Neo4j Docs](docs/neo4j_documentation.md)** - Neo4j driver documentation
 
