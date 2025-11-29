@@ -91,17 +91,25 @@ export async function handleCustomQuery(
 
 /**
  * POST /admin/clear-test-data
- * Clear only test data from the database (nodes with 'test' in id/canonical_id)
+ * Clear only test data from the database
+ *
+ * Matches:
+ * - Nodes with 'test' in id or canonical_id
+ * - Nodes with id or canonical_id starting with 'II' (Arke testnet PIs)
+ *
  * Safe to run in production - will not affect real data
  */
 export async function handleClearTestData(env: Env): Promise<Response> {
   try {
-    // Only delete nodes where id or canonical_id contains 'test'
-    // This protects production data while allowing test cleanup
+    // Delete nodes that are test data:
+    // 1. Contains 'test' in id or canonical_id
+    // 2. Starts with 'II' (Arke testnet PI prefix - impossible for real ULIDs)
     const query = `
       MATCH (n)
       WHERE toString(n.id) CONTAINS 'test'
          OR toString(n.canonical_id) CONTAINS 'test'
+         OR toString(n.id) STARTS WITH 'II'
+         OR toString(n.canonical_id) STARTS WITH 'II'
       DETACH DELETE n
       RETURN count(n) as deleted_count
     `;
@@ -116,7 +124,7 @@ export async function handleClearTestData(env: Env): Promise<Response> {
       data: {
         deleted_nodes: deletedCount,
         deleted_relationships: summary.counters.updates().relationshipsDeleted,
-        pattern: 'nodes with "test" in id or canonical_id',
+        pattern: 'nodes with "test" in id/canonical_id OR starting with "II" (testnet)',
       },
     };
 
