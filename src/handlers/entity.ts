@@ -44,6 +44,24 @@ export async function handleCreateEntity(
       );
     }
 
+    // First check if the PI exists
+    const checkPiQuery = `
+      MATCH (pi:PI {id: $source_pi})
+      RETURN pi.id AS id
+    `;
+    const { records: piRecords } = await executeQuery(env, checkPiQuery, {
+      source_pi,
+    });
+
+    if (piRecords.length === 0) {
+      return errorResponse(
+        `PI not found: ${source_pi}. Create the PI first via /pi/create`,
+        'PI_NOT_FOUND',
+        { source_pi },
+        404
+      );
+    }
+
     // Determine if entity should have a subtype label
     let entityLabel = 'Entity';
     if (type === 'date') {
