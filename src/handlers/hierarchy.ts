@@ -9,6 +9,10 @@ import {
   Env,
   FindInLineageRequest,
   FindInLineageResponse,
+  GetLineageRequest,
+  GetLineageResponse,
+  LineagePiNode,
+  LineageDirection,
 } from '../types';
 
 interface LineageMatch {
@@ -201,6 +205,133 @@ export async function handleFindInLineage(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to find entity in lineage',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /pi/lineage
+ * Get full lineage (ancestors and/or descendants) of a PI
+ */
+export async function handleGetLineage(
+  env: Env,
+  body: GetLineageRequest
+): Promise<Response> {
+  try {
+    const { sourcePi, direction, maxHops } = body;
+
+    // Validation
+    if (!sourcePi) {
+      return errorResponse(
+        'Missing required field: sourcePi',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    if (!direction || !['ancestors', 'descendants', 'both'].includes(direction)) {
+      return errorResponse(
+        'direction must be one of: ancestors, descendants, both',
+        ERROR_CODES.VALIDATION_ERROR,
+        { provided: direction },
+        400
+      );
+    }
+
+    if (typeof maxHops !== 'number' || maxHops < 1) {
+      return errorResponse(
+        'maxHops must be a positive number',
+        ERROR_CODES.VALIDATION_ERROR,
+        { provided: maxHops },
+        400
+      );
+    }
+
+    const response: GetLineageResponse = { sourcePi };
+
+    // Helper to convert Neo4j Integer to JS number
+    const toNumber = (val: any): number => {
+      if (typeof val === 'object' && val !== null && 'toNumber' in val) {
+        return val.toNumber();
+      }
+      return val;
+    };
+
+    // Query ancestors (source goes UP via CHILD_OF)
+    if (direction === 'ancestors' || direction === 'both') {
+      const ancestorQuery = `
+        MATCH (source:PI {id: $sourcePi})
+        MATCH path = (source)-[:CHILD_OF*1..100]->(ancestor:PI)
+        WHERE length(path) <= $maxHops
+        RETURN ancestor.id AS id,
+               ancestor.created_at AS created_at,
+               length(path) AS hops
+        ORDER BY hops ASC
+      `;
+
+      const { records: ancestorRecords } = await executeQuery(env, ancestorQuery, {
+        sourcePi,
+        maxHops,
+      });
+
+      const ancestorPis: LineagePiNode[] = ancestorRecords.map((record) => ({
+        id: record.get('id'),
+        hops: toNumber(record.get('hops')),
+        created_at: record.get('created_at')?.toString(),
+      }));
+
+      // Check if we hit the limit (truncated)
+      const truncated = ancestorPis.length > 0 &&
+        ancestorPis[ancestorPis.length - 1].hops >= maxHops;
+
+      response.ancestors = {
+        pis: ancestorPis,
+        count: ancestorPis.length,
+        truncated,
+      };
+    }
+
+    // Query descendants (descendants have CHILD_OF pointing toward source)
+    if (direction === 'descendants' || direction === 'both') {
+      const descendantQuery = `
+        MATCH (source:PI {id: $sourcePi})
+        MATCH path = (descendant:PI)-[:CHILD_OF*1..100]->(source)
+        WHERE length(path) <= $maxHops
+        RETURN descendant.id AS id,
+               descendant.created_at AS created_at,
+               length(path) AS hops
+        ORDER BY hops ASC
+      `;
+
+      const { records: descendantRecords } = await executeQuery(env, descendantQuery, {
+        sourcePi,
+        maxHops,
+      });
+
+      const descendantPis: LineagePiNode[] = descendantRecords.map((record) => ({
+        id: record.get('id'),
+        hops: toNumber(record.get('hops')),
+        created_at: record.get('created_at')?.toString(),
+      }));
+
+      // Check if we hit the limit (truncated)
+      const truncated = descendantPis.length > 0 &&
+        descendantPis[descendantPis.length - 1].hops >= maxHops;
+
+      response.descendants = {
+        pis: descendantPis,
+        count: descendantPis.length,
+        truncated,
+      };
+    }
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to get lineage',
       error.code,
       { stack: error.stack }
     );

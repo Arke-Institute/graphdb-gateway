@@ -408,6 +408,42 @@ CREATE (subject)-[:RELATIONSHIP {...}]->(object)
 
 ### Lineage Operations
 
+**POST /pi/lineage** - Get full lineage (ancestors and/or descendants) of a PI
+- Returns PI nodes in the lineage hierarchy
+- Supports three directions: `ancestors`, `descendants`, or `both`
+- `maxHops` limits traversal depth per direction
+- Request:
+  ```json
+  {
+    "sourcePi": "01KAZ42PYC...",
+    "direction": "both",
+    "maxHops": 50
+  }
+  ```
+- Response:
+  ```json
+  {
+    "sourcePi": "01KAZ42PYC...",
+    "ancestors": {
+      "pis": [
+        { "id": "01KAZ...", "hops": 1, "created_at": "2025-..." },
+        { "id": "01KAY...", "hops": 2, "created_at": "2025-..." }
+      ],
+      "count": 2,
+      "truncated": false
+    },
+    "descendants": {
+      "pis": [
+        { "id": "01KAZ...", "hops": 1, "created_at": "2025-..." }
+      ],
+      "count": 1,
+      "truncated": false
+    }
+  }
+  ```
+- `truncated: true` indicates more PIs exist beyond maxHops limit
+- Use case: Discover full document hierarchy for context/navigation
+
 **POST /entities/find-in-lineage** - Find entity in direct lineage (ancestors/descendants only)
 - Given a source PI and list of candidate entity IDs, find candidates in the direct lineage
 - **Direct lineage only**: Only matches ancestors (up) or descendants (down)

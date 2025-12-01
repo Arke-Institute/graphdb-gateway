@@ -229,6 +229,43 @@ Content-Type: application/json
 
 ### Lineage Operations
 
+#### Get PI Lineage
+```http
+POST /pi/lineage
+Content-Type: application/json
+
+{
+  "sourcePi": "01KA1H53CP...",
+  "direction": "both",
+  "maxHops": 50
+}
+
+// Response
+{
+  "sourcePi": "01KA1H53CP...",
+  "ancestors": {
+    "pis": [
+      { "id": "01KA1H51YC...", "hops": 1, "created_at": "2025-..." },
+      { "id": "01KA1H4KMP...", "hops": 2, "created_at": "2025-..." }
+    ],
+    "count": 2,
+    "truncated": false
+  },
+  "descendants": {
+    "pis": [
+      { "id": "01KA1H5VGR...", "hops": 1, "created_at": "2025-..." }
+    ],
+    "count": 1,
+    "truncated": false
+  }
+}
+```
+
+**Parameters:**
+- `direction`: `ancestors`, `descendants`, or `both`
+- `maxHops`: Maximum traversal depth per direction
+- `truncated: true` indicates more PIs exist beyond the limit
+
 #### Find Entity in Lineage
 ```http
 POST /entities/find-in-lineage
