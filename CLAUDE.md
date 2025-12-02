@@ -133,24 +133,31 @@ export async function executeQuery(env, query, params) {
 
 ### Node Types
 
-**PI Nodes** (Processed Items in the hierarchy):
-```cypher
-(:PI {
-  id: string,          // ULID identifier
-  created_at: datetime,
-  indexed_at: datetime
-})
-```
+**Unified Entity Model**: All nodes (including PIs) are stored as Entity nodes. PIs are distinguished by `type: 'pi'`.
 
 **Entity Nodes**:
 ```cypher
 (:Entity {
-  canonical_id: string,         // UUID (primary identifier)
-  code: string,                 // Human-readable code
+  canonical_id: string,         // UUID or ULID (primary identifier)
+  code: string,                 // Human-readable code (PIs use 'pi_' + canonical_id)
   label: string,                // Display name
-  type: string,                 // Entity type (person, event, date, file, etc.)
+  type: string,                 // Entity type: 'pi', 'person', 'event', 'date', 'file', etc.
   properties: string,           // JSON-serialized map
-  created_by_pi: string,        // PI that created this entity (immutable)
+  created_by_pi: string|null,   // PI that created this entity (null for PI entities)
+  first_seen: datetime,
+  last_updated: datetime
+})
+```
+
+**PI Entities** (Processed Items with `type: 'pi'`):
+```cypher
+(:Entity {
+  canonical_id: '01KAZ42PYC...',  // ULID identifier
+  code: 'pi_01KAZ42PYC...',       // Prefixed with 'pi_'
+  label: '01KAZ42PYC...',         // Same as canonical_id
+  type: 'pi',                     // Distinguishes PI entities
+  properties: '{}',
+  created_by_pi: null,            // PIs have no creator
   first_seen: datetime,
   last_updated: datetime
 })
@@ -162,19 +169,21 @@ export async function executeQuery(env, query, params) {
 
 ### Relationship Types
 
-**PI Hierarchy**:
+**PI Hierarchy** (between Entity nodes with `type: 'pi'`):
 ```cypher
-(:PI)-[:PARENT_OF]->(:PI)
-(:PI)-[:CHILD_OF]->(:PI)
+(:Entity {type:'pi'})-[:PARENT_OF]->(:Entity {type:'pi'})
+(:Entity {type:'pi'})-[:CHILD_OF]->(:Entity {type:'pi'})
 ```
 
-**Entity Extraction**:
+**Entity Extraction** (non-PI entities link to PI entities):
 ```cypher
 (:Entity)-[:EXTRACTED_FROM {
   original_code: string,
   extracted_at: datetime
-}]->(:PI)
+}]->(:Entity {type:'pi'})
 ```
+
+**Note**: PI entities do NOT have EXTRACTED_FROM relationships to themselves.
 
 **Entity Relationships**:
 ```cypher
@@ -232,9 +241,9 @@ All errors return this structure:
 
 **MERGE for idempotency** (create or update):
 ```cypher
-MERGE (p:PI {id: $pi})
-ON CREATE SET p.created_at = datetime()
-ON MATCH SET p.indexed_at = datetime()
+MERGE (p:Entity {canonical_id: $pi, type: 'pi'})
+ON CREATE SET p.code = 'pi_' + $pi, p.label = $pi, p.first_seen = datetime()
+ON MATCH SET p.last_updated = datetime()
 ```
 
 **UNWIND for batch operations**:
@@ -269,9 +278,10 @@ CREATE (subject)-[:RELATIONSHIP {...}]->(object)
 
 ### PI Operations
 
-**POST /pi/create** - Create PI node with parent-child relationships
-- Creates or updates a PI node
-- Optionally links to parent and/or children PIs
+**POST /pi/create** - Create PI entity with parent-child relationships
+- Creates Entity node with `type: 'pi'` (convenience wrapper)
+- Optionally links to parent and/or children PIs via PARENT_OF/CHILD_OF
+- Auto-creates parent/children PI entities if they don't exist
 - Idempotent (uses MERGE)
 
 ### Entity Operations
@@ -279,7 +289,14 @@ CREATE (subject)-[:RELATIONSHIP {...}]->(object)
 **POST /entity/create** - Create new entity (idempotent via MERGE)
 - Simple storage (does NOT resolve entity refs)
 - Accepts clean properties only
-- Creates EXTRACTED_FROM relationship to source PI
+- **For PI entities** (`type: 'pi'`):
+  - `source_pi` must equal `canonical_id` (self-referential)
+  - No EXTRACTED_FROM relationship created
+  - `created_by_pi` is set to `null`
+- **For other entities** (`type !== 'pi'`):
+  - `source_pi` must exist as an `Entity {type: 'pi'}` (404 if not found)
+  - Creates EXTRACTED_FROM relationship to the PI entity
+  - `created_by_pi` is set to `source_pi`
 - **Idempotent**: Uses MERGE on canonical_id to handle concurrent requests safely
 - If entity exists, updates `last_updated` timestamp and adds source PI relationship
 
@@ -589,6 +606,7 @@ Done: Entity merged successfully
 **Database Indexes** (added via `npm run add-indexes`):
 - `entity_code_idx`: Index on Entity.code for fast hierarchy lookups
 - `entity_type_code_idx`: Composite index on (Entity.type, Entity.code) for filtered queries
+- `entity_type_idx`: Index on Entity.type for fast PI entity lookups (`type: 'pi'`)
 
 ## Testing Strategy
 

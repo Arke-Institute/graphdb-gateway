@@ -15,32 +15,52 @@ async function populateData() {
   const driver = neo4j.driver(URI, neo4j.auth.basic(USER, PASSWORD));
 
   try {
-    // Step 1: Create PI hierarchy
+    // Step 1: Create PI hierarchy (as Entity nodes with type='pi')
     console.log('1️⃣ Creating PI hierarchy...');
     await driver.executeQuery(
       `
-      // Create parent PI (research project)
-      CREATE (parent:PI {
-        id: '01PROJECT_AI_RESEARCH_2024',
-        created_at: datetime(),
-        indexed_at: datetime()
+      // Create parent PI entity (research project)
+      CREATE (parent:Entity {
+        canonical_id: '01PROJECT_AI_RESEARCH_2024',
+        code: 'pi_01PROJECT_AI_RESEARCH_2024',
+        label: '01PROJECT_AI_RESEARCH_2024',
+        type: 'pi',
+        properties: '{}',
+        created_by_pi: null,
+        first_seen: datetime(),
+        last_updated: datetime()
       })
 
-      // Create child PIs (papers in the project)
-      CREATE (paper1:PI {
-        id: '01PAPER_NEURAL_NETWORKS_2024',
-        created_at: datetime(),
-        indexed_at: datetime()
+      // Create child PI entities (papers in the project)
+      CREATE (paper1:Entity {
+        canonical_id: '01PAPER_NEURAL_NETWORKS_2024',
+        code: 'pi_01PAPER_NEURAL_NETWORKS_2024',
+        label: '01PAPER_NEURAL_NETWORKS_2024',
+        type: 'pi',
+        properties: '{}',
+        created_by_pi: null,
+        first_seen: datetime(),
+        last_updated: datetime()
       })
-      CREATE (paper2:PI {
-        id: '01PAPER_DEEP_LEARNING_2024',
-        created_at: datetime(),
-        indexed_at: datetime()
+      CREATE (paper2:Entity {
+        canonical_id: '01PAPER_DEEP_LEARNING_2024',
+        code: 'pi_01PAPER_DEEP_LEARNING_2024',
+        label: '01PAPER_DEEP_LEARNING_2024',
+        type: 'pi',
+        properties: '{}',
+        created_by_pi: null,
+        first_seen: datetime(),
+        last_updated: datetime()
       })
-      CREATE (paper3:PI {
-        id: '01PAPER_TRANSFORMERS_2024',
-        created_at: datetime(),
-        indexed_at: datetime()
+      CREATE (paper3:Entity {
+        canonical_id: '01PAPER_TRANSFORMERS_2024',
+        code: 'pi_01PAPER_TRANSFORMERS_2024',
+        label: '01PAPER_TRANSFORMERS_2024',
+        type: 'pi',
+        properties: '{}',
+        created_by_pi: null,
+        first_seen: datetime(),
+        last_updated: datetime()
       })
 
       // Create relationships
@@ -117,13 +137,14 @@ async function populateData() {
     for (const person of people) {
       await driver.executeQuery(
         `
-        MATCH (pi:PI {id: $pi})
+        MATCH (pi:Entity {canonical_id: $pi, type: 'pi'})
         CREATE (e:Entity {
           canonical_id: $canonical_id,
           code: $code,
           label: $label,
           type: 'person',
           properties: $properties,
+          created_by_pi: $pi,
           first_seen: datetime(),
           last_updated: datetime()
         })
@@ -198,13 +219,14 @@ async function populateData() {
     for (const org of organizations) {
       await driver.executeQuery(
         `
-        MATCH (pi:PI {id: $pi})
+        MATCH (pi:Entity {canonical_id: $pi, type: 'pi'})
         CREATE (e:Entity {
           canonical_id: $canonical_id,
           code: $code,
           label: $label,
           type: 'organization',
           properties: $properties,
+          created_by_pi: $pi,
           first_seen: datetime(),
           last_updated: datetime()
         })
@@ -262,13 +284,14 @@ async function populateData() {
     for (const topic of topics) {
       await driver.executeQuery(
         `
-        MATCH (pi:PI {id: $pi})
+        MATCH (pi:Entity {canonical_id: $pi, type: 'pi'})
         CREATE (e:Entity {
           canonical_id: $canonical_id,
           code: $code,
           label: $label,
           type: 'topic',
           properties: $properties,
+          created_by_pi: $pi,
           first_seen: datetime(),
           last_updated: datetime()
         })
@@ -411,9 +434,10 @@ async function populateData() {
 
     const stats = await driver.executeQuery(
       `
-      MATCH (pi:PI)
+      MATCH (pi:Entity {type: 'pi'})
       WITH count(pi) as piCount
       MATCH (e:Entity)
+      WHERE e.type <> 'pi'
       WITH piCount, count(e) as entityCount, collect(DISTINCT e.type) as entityTypes
       MATCH ()-[r:RELATIONSHIP]->()
       WITH piCount, entityCount, entityTypes, count(r) as relCount
@@ -425,8 +449,8 @@ async function populateData() {
     );
 
     const summary = stats.records[0];
-    console.log(`📦 PI Nodes: ${summary.get('piCount')}`);
-    console.log(`👥 Entity Nodes: ${summary.get('entityCount')}`);
+    console.log(`📦 PI Entities: ${summary.get('piCount')}`);
+    console.log(`👥 Other Entities: ${summary.get('entityCount')}`);
     console.log(`   Types: ${summary.get('entityTypes').join(', ')}`);
     console.log(`🔗 RELATIONSHIP edges: ${summary.get('relCount')}`);
     console.log(`📎 EXTRACTED_FROM edges: ${summary.get('extractedFromCount')}\n`);
@@ -442,11 +466,12 @@ async function populateData() {
     console.log('   RETURN p1.label, p2.label, r.properties\n');
 
     console.log('3. Trace PI hierarchy:');
-    console.log('   MATCH (parent:PI)-[:PARENT_OF]->(child:PI)');
-    console.log('   RETURN parent.id, collect(child.id)\n');
+    console.log('   MATCH (parent:Entity {type: "pi"})-[:PARENT_OF]->(child:Entity {type: "pi"})');
+    console.log('   RETURN parent.canonical_id, collect(child.canonical_id)\n');
 
     console.log('4. Find entities from specific PI:');
-    console.log('   MATCH (pi:PI {id: "01PAPER_NEURAL_NETWORKS_2024"})<-[:EXTRACTED_FROM]-(e:Entity)');
+    console.log('   MATCH (pi:Entity {canonical_id: "01PAPER_NEURAL_NETWORKS_2024", type: "pi"})<-[:EXTRACTED_FROM]-(e:Entity)');
+    console.log('   WHERE e.type <> "pi"');
     console.log('   RETURN e.type, e.label, e.properties\n');
 
     console.log('✅ Sample data populated successfully!\n');

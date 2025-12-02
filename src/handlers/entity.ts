@@ -27,6 +27,9 @@ import {
 /**
  * POST /entity/create
  * Create new canonical entity with EXTRACTED_FROM relationship
+ *
+ * For PI entities (type='pi'): source_pi must equal canonical_id, no EXTRACTED_FROM created
+ * For other entities: source_pi must exist as Entity {type:'pi'}, EXTRACTED_FROM created
  */
 export async function handleCreateEntity(
   env: Env,
@@ -44,24 +47,6 @@ export async function handleCreateEntity(
       );
     }
 
-    // First check if the PI exists
-    const checkPiQuery = `
-      MATCH (pi:PI {id: $source_pi})
-      RETURN pi.id AS id
-    `;
-    const { records: piRecords } = await executeQuery(env, checkPiQuery, {
-      source_pi,
-    });
-
-    if (piRecords.length === 0) {
-      return errorResponse(
-        `PI not found: ${source_pi}. Create the PI first via /pi/create`,
-        'PI_NOT_FOUND',
-        { source_pi },
-        404
-      );
-    }
-
     // Determine if entity should have a subtype label
     let entityLabel = 'Entity';
     if (type === 'date') {
@@ -70,9 +55,75 @@ export async function handleCreateEntity(
       entityLabel = 'Entity:File';
     }
 
+    // PI entities: source_pi must equal canonical_id, no EXTRACTED_FROM
+    if (type === 'pi') {
+      if (source_pi !== canonical_id) {
+        return errorResponse(
+          'For PI entities, source_pi must equal canonical_id',
+          ERROR_CODES.VALIDATION_ERROR,
+          { source_pi, canonical_id },
+          400
+        );
+      }
+
+      const query = `
+        MERGE (e:${entityLabel} {canonical_id: $canonical_id})
+        ON CREATE SET
+          e.code = $code,
+          e.label = $label,
+          e.type = $type,
+          e.properties = $properties,
+          e.created_by_pi = null,
+          e.first_seen = datetime(),
+          e.last_updated = datetime()
+        ON MATCH SET
+          e.last_updated = datetime()
+        RETURN e,
+               CASE WHEN e.first_seen = e.last_updated THEN true ELSE false END as was_created
+      `;
+
+      const { summary } = await executeQuery(env, query, {
+        canonical_id,
+        code,
+        label,
+        type,
+        properties: JSON.stringify(properties || {}),
+      });
+
+      const response: SuccessResponse = {
+        success: true,
+        message: 'PI entity created successfully',
+        data: {
+          canonical_id,
+          nodesCreated: summary.counters.updates().nodesCreated,
+          relationshipsCreated: 0,
+        },
+      };
+
+      return jsonResponse(response);
+    }
+
+    // Non-PI entities: check that source_pi exists as Entity {type:'pi'}
+    const checkPiQuery = `
+      MATCH (pi:Entity {canonical_id: $source_pi, type: 'pi'})
+      RETURN pi.canonical_id AS id
+    `;
+    const { records: piRecords } = await executeQuery(env, checkPiQuery, {
+      source_pi,
+    });
+
+    if (piRecords.length === 0) {
+      return errorResponse(
+        `PI entity not found: ${source_pi}. Create the PI first via /pi/create or /entity/create with type='pi'`,
+        'PI_NOT_FOUND',
+        { source_pi },
+        404
+      );
+    }
+
     // Use MERGE on canonical_id to make this atomic and idempotent
     const query = `
-      MATCH (pi:PI {id: $source_pi})
+      MATCH (pi:Entity {canonical_id: $source_pi, type: 'pi'})
       MERGE (e:${entityLabel} {canonical_id: $canonical_id})
       ON CREATE SET
         e.code = $code,
@@ -203,8 +254,8 @@ export async function handleMergeEntity(
       WITH source, target, count(DISTINCT r) AS rel_count
 
       // Get source's EXTRACTED_FROM PIs before merge
-      OPTIONAL MATCH (source)-[:EXTRACTED_FROM]->(pi:PI)
-      WITH source, target, rel_count, collect(DISTINCT pi.id) AS source_pis
+      OPTIONAL MATCH (source)-[:EXTRACTED_FROM]->(pi:Entity {type: 'pi'})
+      WITH source, target, rel_count, collect(DISTINCT pi.canonical_id) AS source_pis
 
       // Count source properties and merge them into target's properties
       WITH source, target, rel_count, source_pis,
@@ -358,10 +409,10 @@ export async function handleQueryEntity(
       MATCH (e:Entity {code: $code})
       OPTIONAL MATCH (e)-[r_out]->(target_out:Entity)
       OPTIONAL MATCH (source_in:Entity)-[r_in]->(e)
-      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:Entity {type: 'pi'})
 
       WITH e,
-           collect(DISTINCT pi.id) as source_pis,
+           collect(DISTINCT pi.canonical_id) as source_pis,
            collect(DISTINCT {
              type: type(r_out),
              direction: 'outgoing',
@@ -461,10 +512,11 @@ export async function handleListEntities(
     const piArray = pi ? [pi] : pis!;
 
     const query = `
-      MATCH (pi:PI)<-[:EXTRACTED_FROM]-(e:Entity)
-      WHERE pi.id IN $pis
+      MATCH (pi:Entity {type: 'pi'})<-[:EXTRACTED_FROM]-(e:Entity)
+      WHERE pi.canonical_id IN $pis
         AND ($type IS NULL OR e.type = $type)
-      WITH e, collect(DISTINCT pi.id) AS source_pis
+        AND e.type <> 'pi'
+      WITH e, collect(DISTINCT pi.canonical_id) AS source_pis
       RETURN DISTINCT
         e.canonical_id AS canonical_id,
         e.code AS code,
@@ -584,8 +636,8 @@ export async function handleGetEntity(
 
     const query = `
       MATCH (e:Entity {canonical_id: $canonical_id})
-      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
-      WITH e, collect(DISTINCT pi.id) as source_pis
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:Entity {type: 'pi'})
+      WITH e, collect(DISTINCT pi.canonical_id) as source_pis
       RETURN e.canonical_id AS canonical_id,
              e.code AS code,
              e.label AS label,
@@ -652,8 +704,8 @@ export async function handleLookupByCode(
       MATCH (e:Entity {code: $code})
       WHERE ($type IS NULL OR e.type = $type)
         AND ($excludeType IS NULL OR e.type <> $excludeType)
-      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:PI)
-      WITH e, collect(DISTINCT pi.id) AS source_pis
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(pi:Entity {type: 'pi'})
+      WITH e, collect(DISTINCT pi.canonical_id) AS source_pis
       RETURN e.canonical_id AS canonical_id,
              e.code AS code,
              e.label AS label,

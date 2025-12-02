@@ -60,9 +60,10 @@ export async function handleFindInLineage(
 
     // 1. Check same PI (hops = 0)
     const samePiQuery = `
-      MATCH (source:PI {id: $sourcePi})
+      MATCH (source:Entity {canonical_id: $sourcePi, type: 'pi'})
       MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(source)
       WHERE candidate.canonical_id IN $candidateIds
+        AND candidate.type <> 'pi'
       RETURN candidate.canonical_id AS canonical_id,
              candidate.code AS code,
              candidate.label AS label,
@@ -95,10 +96,11 @@ export async function handleFindInLineage(
     // Only if we haven't found a same-PI match (hops=0 is best)
     if (matches.length === 0 && maxHops > 0) {
       const ancestorQuery = `
-        MATCH (source:PI {id: $sourcePi})
-        MATCH path = (source)-[:CHILD_OF*1..20]->(ancestorPi:PI)
+        MATCH (source:Entity {canonical_id: $sourcePi, type: 'pi'})
+        MATCH path = (source)-[:CHILD_OF*1..20]->(ancestorPi:Entity {type: 'pi'})
         MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(ancestorPi)
         WHERE candidate.canonical_id IN $candidateIds
+          AND candidate.type <> 'pi'
           AND length(path) <= $maxHops
         RETURN candidate.canonical_id AS canonical_id,
                candidate.code AS code,
@@ -138,10 +140,11 @@ export async function handleFindInLineage(
     // Only check if maxHops > 0
     if (maxHops > 0) {
       const descendantQuery = `
-        MATCH (source:PI {id: $sourcePi})
-        MATCH path = (descendantPi:PI)-[:CHILD_OF*1..20]->(source)
+        MATCH (source:Entity {canonical_id: $sourcePi, type: 'pi'})
+        MATCH path = (descendantPi:Entity {type: 'pi'})-[:CHILD_OF*1..20]->(source)
         MATCH (candidate:Entity)-[:EXTRACTED_FROM]->(descendantPi)
         WHERE candidate.canonical_id IN $candidateIds
+          AND candidate.type <> 'pi'
           AND length(path) <= $maxHops
         RETURN candidate.canonical_id AS canonical_id,
                candidate.code AS code,
@@ -263,11 +266,11 @@ export async function handleGetLineage(
     // Query ancestors (source goes UP via CHILD_OF)
     if (direction === 'ancestors' || direction === 'both') {
       const ancestorQuery = `
-        MATCH (source:PI {id: $sourcePi})
-        MATCH path = (source)-[:CHILD_OF*1..100]->(ancestor:PI)
+        MATCH (source:Entity {canonical_id: $sourcePi, type: 'pi'})
+        MATCH path = (source)-[:CHILD_OF*1..100]->(ancestor:Entity {type: 'pi'})
         WHERE length(path) <= $maxHops
-        RETURN ancestor.id AS id,
-               ancestor.created_at AS created_at,
+        RETURN ancestor.canonical_id AS id,
+               ancestor.first_seen AS created_at,
                length(path) AS hops
         ORDER BY hops ASC
       `;
@@ -297,11 +300,11 @@ export async function handleGetLineage(
     // Query descendants (descendants have CHILD_OF pointing toward source)
     if (direction === 'descendants' || direction === 'both') {
       const descendantQuery = `
-        MATCH (source:PI {id: $sourcePi})
-        MATCH path = (descendant:PI)-[:CHILD_OF*1..100]->(source)
+        MATCH (source:Entity {canonical_id: $sourcePi, type: 'pi'})
+        MATCH path = (descendant:Entity {type: 'pi'})-[:CHILD_OF*1..100]->(source)
         WHERE length(path) <= $maxHops
-        RETURN descendant.id AS id,
-               descendant.created_at AS created_at,
+        RETURN descendant.canonical_id AS id,
+               descendant.first_seen AS created_at,
                length(path) AS hops
         ORDER BY hops ASC
       `;

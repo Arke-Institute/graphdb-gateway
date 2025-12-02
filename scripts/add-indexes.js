@@ -131,6 +131,25 @@ async function addIndexes() {
       console.log('   ✅ Index created successfully');
     }
 
+    // Index 3: Entity.type (for PI entity lookups and type filtering)
+    const typeIndexName = 'entity_type_idx';
+    const existsTypeIndex = existingIndexes.some(
+      idx => idx.name === typeIndexName
+    );
+
+    if (existsTypeIndex) {
+      console.log(`✅ Index "${typeIndexName}" already exists`);
+    } else {
+      console.log(`\n📝 Creating index "${typeIndexName}" on Entity.type...`);
+      console.log('   ⚠️  This enables fast lookup of PI entities (type="pi")');
+      await driver.executeQuery(
+        'CREATE INDEX entity_type_idx IF NOT EXISTS FOR (e:Entity) ON (e.type)',
+        {},
+        { database: NEO4J_DATABASE }
+      );
+      console.log('   ✅ Index created successfully');
+    }
+
     // Show all constraints and indexes after creation
     console.log('\n📊 Current Entity constraints:');
     const { records: finalConstraintRecords } = await driver.executeQuery(showConstraintsQuery, {}, {
