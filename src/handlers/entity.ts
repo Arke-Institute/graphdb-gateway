@@ -66,6 +66,7 @@ export async function handleCreateEntity(
         );
       }
 
+      // Use APOC to merge properties on update
       const query = `
         MERGE (e:${entityLabel} {canonical_id: $canonical_id})
         ON CREATE SET
@@ -77,6 +78,14 @@ export async function handleCreateEntity(
           e.first_seen = datetime(),
           e.last_updated = datetime()
         ON MATCH SET
+          e.code = $code,
+          e.label = $label,
+          e.properties = apoc.convert.toJson(
+            apoc.map.merge(
+              apoc.convert.fromJsonMap(coalesce(e.properties, '{}')),
+              apoc.convert.fromJsonMap($properties)
+            )
+          ),
           e.last_updated = datetime()
         RETURN e,
                CASE WHEN e.first_seen = e.last_updated THEN true ELSE false END as was_created
@@ -122,6 +131,7 @@ export async function handleCreateEntity(
     }
 
     // Use MERGE on canonical_id to make this atomic and idempotent
+    // ON MATCH: update label/code and merge properties (new properties override existing)
     const query = `
       MATCH (pi:Entity {canonical_id: $source_pi, type: 'pi'})
       MERGE (e:${entityLabel} {canonical_id: $canonical_id})
@@ -134,6 +144,14 @@ export async function handleCreateEntity(
         e.first_seen = datetime(),
         e.last_updated = datetime()
       ON MATCH SET
+        e.code = $code,
+        e.label = $label,
+        e.properties = apoc.convert.toJson(
+          apoc.map.merge(
+            apoc.convert.fromJsonMap(coalesce(e.properties, '{}')),
+            apoc.convert.fromJsonMap($properties)
+          )
+        ),
         e.last_updated = datetime()
       WITH e, pi
       MERGE (e)-[rel:EXTRACTED_FROM]->(pi)
