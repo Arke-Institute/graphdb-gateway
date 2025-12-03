@@ -2,7 +2,7 @@
  * Request router and handler dispatch
  */
 
-import { handleCreatePI } from './handlers/pi';
+import { handleCreatePI, handleGetPIEntitiesWithRelationships } from './handlers/pi';
 import {
   handleCreateEntity,
   handleMergeEntity,
@@ -36,6 +36,7 @@ interface RouteTable {
 const routes: RouteTable = {
   'POST /pi/create': handleCreatePI,
   'POST /pi/lineage': handleGetLineage,
+  'POST /pi/entities-with-relationships': handleGetPIEntitiesWithRelationships,
   'POST /entity/create': handleCreateEntity,
   'POST /entity/merge': handleMergeEntity,
   'POST /entity/query': handleQueryEntity,
@@ -54,6 +55,7 @@ const routes: RouteTable = {
 const ENDPOINTS = [
   'POST /pi/create',
   'POST /pi/lineage',
+  'POST /pi/entities-with-relationships',
   'POST /entity/create',
   'POST /entity/merge',
   'POST /entity/query',
