@@ -2,7 +2,7 @@
  * Request router and handler dispatch
  */
 
-import { handleCreatePI, handleGetPIEntitiesWithRelationships } from './handlers/pi';
+import { handleCreatePI, handleGetPIEntitiesWithRelationships, handlePurgePIData } from './handlers/pi';
 import {
   handleCreateEntity,
   handleMergeEntity,
@@ -20,6 +20,7 @@ import {
   handleGetEntityRelationships,
 } from './handlers/relationship';
 import { handleClearTestData, handleCustomQuery } from './handlers/admin';
+import { handlePathsBetween, handlePathsReachable } from './handlers/paths';
 import { errorResponse, handleOptions, jsonResponse } from './utils/response';
 import { ERROR_CODES, API_VERSION, SERVICE_NAME } from './constants';
 import { Env } from './types';
@@ -45,6 +46,8 @@ const routes: RouteTable = {
   'POST /entities/find-in-lineage': handleFindInLineage,
   'POST /relationships/create': handleCreateRelationships,
   'POST /relationships/merge': handleMergeRelationships,
+  'POST /paths/between': handlePathsBetween,
+  'POST /paths/reachable': handlePathsReachable,
   'POST /query': handleCustomQuery,
   'POST /admin/clear-test-data': (env: Env) => handleClearTestData(env),
 };
@@ -56,6 +59,7 @@ const ENDPOINTS = [
   'POST /pi/create',
   'POST /pi/lineage',
   'POST /pi/entities-with-relationships',
+  'POST /pi/:pi/purge',
   'POST /entity/create',
   'POST /entity/merge',
   'POST /entity/query',
@@ -68,6 +72,8 @@ const ENDPOINTS = [
   'POST /relationships/create',
   'POST /relationships/merge',
   'GET /relationships/:canonical_id',
+  'POST /paths/between',
+  'POST /paths/reachable',
   'POST /query',
   'POST /admin/clear-test-data',
 ];
@@ -103,6 +109,26 @@ export async function handleRequest(
   if (path === '/' || path === '/health') {
     if (request.method === 'GET') {
       return jsonResponse(getHealthResponse());
+    }
+  }
+
+  // Handle POST /pi/:pi/purge
+  if (request.method === 'POST' && path.startsWith('/pi/') && path.endsWith('/purge')) {
+    // Extract PI from path: /pi/{pi}/purge
+    const pathParts = path.split('/');
+    if (pathParts.length === 4 && pathParts[1] === 'pi' && pathParts[3] === 'purge') {
+      const pi = decodeURIComponent(pathParts[2]);
+      if (pi) {
+        try {
+          return await handlePurgePIData(env, pi);
+        } catch (error: any) {
+          return errorResponse(
+            'Internal server error',
+            ERROR_CODES.INTERNAL_ERROR,
+            { message: error.message, stack: error.stack }
+          );
+        }
+      }
     }
   }
 

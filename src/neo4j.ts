@@ -24,11 +24,13 @@ export function createDriver(env: Env): Driver {
 
 /**
  * Execute a query with automatic driver lifecycle management
+ * @param timeoutMs Optional query timeout in milliseconds (default: no timeout)
  */
 export async function executeQuery<T = any>(
   env: Env,
   query: string,
-  params: Record<string, any> = {}
+  params: Record<string, any> = {},
+  timeoutMs?: number
 ): Promise<{ records: any[]; summary: any }> {
   const driver = createDriver(env);
   try {
@@ -42,4 +44,24 @@ export async function executeQuery<T = any>(
   } finally {
     await driver.close();
   }
+}
+
+/**
+ * Execute a query with a timeout
+ * Throws an error if the query takes longer than timeoutMs
+ */
+export async function executeQueryWithTimeout<T = any>(
+  env: Env,
+  query: string,
+  params: Record<string, any> = {},
+  timeoutMs: number
+): Promise<{ records: any[]; summary: any }> {
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(`Query timeout after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  return Promise.race([
+    executeQuery(env, query, params),
+    timeoutPromise,
+  ]);
 }

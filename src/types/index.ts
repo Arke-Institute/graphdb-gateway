@@ -10,3 +10,4 @@ export * from './pi';
 export * from './entity';
 export * from './hierarchy';
 export * from './relationship';
+export * from './paths';
