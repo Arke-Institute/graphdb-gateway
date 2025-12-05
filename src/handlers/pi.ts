@@ -17,6 +17,7 @@ import {
   PIEntitiesWithRelationshipsResponse,
   EntityWithRelationships,
   EntityRelationshipInline,
+  PurgePIDataResponse,
 } from '../types';
 
 /**
@@ -267,6 +268,147 @@ export async function handleGetPIEntitiesWithRelationships(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to get PI entities with relationships',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /pi/:pi/purge
+ * Remove all data contributed by a PI
+ *
+ * This endpoint performs a "clean slate" operation:
+ * 1. Identifies entities that will be orphaned (only this PI as source)
+ * 2. Identifies entities that have other sources (will be detached, not deleted)
+ * 3. Deletes all RELATIONSHIP edges with source_pi = this PI
+ * 4. Deletes all EXTRACTED_FROM relationships to this PI
+ * 5. Deletes orphaned entities (entities with no remaining EXTRACTED_FROM)
+ *
+ * Returns the list of deleted entity IDs so the caller can clean up Pinecone.
+ *
+ * Note: This does NOT delete the PI entity itself, only its contributed data.
+ * The PI can then be re-processed with new data.
+ */
+export async function handlePurgePIData(
+  env: Env,
+  pi: string
+): Promise<Response> {
+  try {
+    if (!pi) {
+      return errorResponse(
+        'Missing required parameter: pi',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    // Step 1: Check if PI exists
+    const piExistsQuery = `
+      MATCH (pi:Entity {canonical_id: $pi, type: 'pi'})
+      RETURN pi.canonical_id AS id
+    `;
+    const { records: piRecords } = await executeQuery(env, piExistsQuery, { pi });
+
+    if (piRecords.length === 0) {
+      // PI doesn't exist - nothing to purge
+      const response: PurgePIDataResponse = {
+        success: true,
+        pi,
+        purged: {
+          entities_deleted: [],
+          entities_detached: [],
+          relationships_deleted: 0,
+          extracted_from_deleted: 0,
+        },
+      };
+      return jsonResponse(response);
+    }
+
+    // Step 2: Find entities that will be orphaned (only this PI as source)
+    // These are entities where:
+    // - They have EXTRACTED_FROM to this PI
+    // - They have NO EXTRACTED_FROM to any other PI
+    // - They are not PI entities themselves
+    const findOrphanedQuery = `
+      MATCH (e:Entity)-[:EXTRACTED_FROM]->(pi:Entity {canonical_id: $pi, type: 'pi'})
+      WHERE e.type <> 'pi'
+      WITH e
+      OPTIONAL MATCH (e)-[:EXTRACTED_FROM]->(other:Entity {type: 'pi'})
+      WHERE other.canonical_id <> $pi
+      WITH e, count(other) as other_source_count
+      WHERE other_source_count = 0
+      RETURN collect(e.canonical_id) as orphaned_ids
+    `;
+    const { records: orphanedRecords } = await executeQuery(env, findOrphanedQuery, { pi });
+    const orphanedIds: string[] = orphanedRecords[0]?.get('orphaned_ids') || [];
+
+    // Step 3: Find entities that have other sources (will be detached, not deleted)
+    const findDetachedQuery = `
+      MATCH (e:Entity)-[:EXTRACTED_FROM]->(pi:Entity {canonical_id: $pi, type: 'pi'})
+      WHERE e.type <> 'pi'
+      WITH e
+      MATCH (e)-[:EXTRACTED_FROM]->(other:Entity {type: 'pi'})
+      WHERE other.canonical_id <> $pi
+      RETURN collect(DISTINCT e.canonical_id) as detached_ids
+    `;
+    const { records: detachedRecords } = await executeQuery(env, findDetachedQuery, { pi });
+    const detachedIds: string[] = detachedRecords[0]?.get('detached_ids') || [];
+
+    // Step 4: Delete all RELATIONSHIP edges with source_pi = this PI
+    // Use directed pattern to avoid double-counting
+    const deleteRelationshipsQuery = `
+      MATCH ()-[r:RELATIONSHIP {source_pi: $pi}]->()
+      WITH count(r) as rel_count
+      MATCH ()-[r:RELATIONSHIP {source_pi: $pi}]->()
+      DELETE r
+      RETURN rel_count
+    `;
+    const { records: relRecords } = await executeQuery(env, deleteRelationshipsQuery, { pi });
+    const relationshipsDeleted = Number(relRecords[0]?.get('rel_count') || 0);
+
+    // Step 5: Delete all EXTRACTED_FROM relationships to this PI
+    const deleteExtractedFromQuery = `
+      MATCH (e:Entity)-[ef:EXTRACTED_FROM]->(pi:Entity {canonical_id: $pi, type: 'pi'})
+      WITH count(ef) as ef_count
+      MATCH (e:Entity)-[ef:EXTRACTED_FROM]->(pi:Entity {canonical_id: $pi, type: 'pi'})
+      DELETE ef
+      RETURN ef_count
+    `;
+    const { records: efRecords } = await executeQuery(env, deleteExtractedFromQuery, { pi });
+    const extractedFromDeleted = Number(efRecords[0]?.get('ef_count') || 0);
+
+    // Step 6: Delete orphaned entities
+    // Only delete entities that:
+    // - Are in our orphaned list
+    // - Have no remaining EXTRACTED_FROM relationships (double-check after step 5)
+    if (orphanedIds.length > 0) {
+      const deleteOrphanedQuery = `
+        UNWIND $orphaned_ids as oid
+        MATCH (e:Entity {canonical_id: oid})
+        WHERE NOT EXISTS { (e)-[:EXTRACTED_FROM]->(:Entity {type: 'pi'}) }
+        DETACH DELETE e
+        RETURN count(*) as deleted_count
+      `;
+      await executeQuery(env, deleteOrphanedQuery, { orphaned_ids: orphanedIds });
+    }
+
+    const response: PurgePIDataResponse = {
+      success: true,
+      pi,
+      purged: {
+        entities_deleted: orphanedIds,
+        entities_detached: detachedIds,
+        relationships_deleted: relationshipsDeleted,
+        extracted_from_deleted: extractedFromDeleted,
+      },
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to purge PI data',
       error.code,
       { stack: error.stack }
     );

@@ -56,3 +56,28 @@ export interface PIEntitiesWithRelationshipsResponse {
   entities: EntityWithRelationships[];
   total_count: number;
 }
+
+/**
+ * Response from /pi/:pi/purge
+ *
+ * Removes all data contributed by a PI:
+ * - Deletes RELATIONSHIP edges with source_pi = this PI
+ * - Deletes EXTRACTED_FROM relationships to this PI
+ * - Deletes orphaned entities (entities with no remaining EXTRACTED_FROM relationships
+ *   that were created by this PI)
+ * - Detaches entities that have other sources (removes EXTRACTED_FROM but keeps entity)
+ */
+export interface PurgePIDataResponse {
+  success: boolean;
+  pi: string;
+  purged: {
+    /** Canonical IDs of entities that were fully deleted (orphaned - no other sources) */
+    entities_deleted: string[];
+    /** Canonical IDs of entities that were detached (still have other sources) */
+    entities_detached: string[];
+    /** Number of RELATIONSHIP edges deleted */
+    relationships_deleted: number;
+    /** Number of EXTRACTED_FROM relationships deleted */
+    extracted_from_deleted: number;
+  };
+}
