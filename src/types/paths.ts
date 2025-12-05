@@ -7,8 +7,12 @@
  */
 export interface PathEdge {
   subject_id: string;
+  subject_label: string;
+  subject_type: string;
   predicate: string;
   object_id: string;
+  object_label: string;
+  object_type: string;
   source_pi: string;
 }
 

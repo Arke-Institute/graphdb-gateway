@@ -118,8 +118,12 @@ export async function handlePathsBetween(
              length(path) AS length,
              [rel IN relationships(path) | {
                subject_id: startNode(rel).canonical_id,
+               subject_label: startNode(rel).label,
+               subject_type: startNode(rel).type,
                predicate: rel.predicate,
                object_id: endNode(rel).canonical_id,
+               object_label: endNode(rel).label,
+               object_type: endNode(rel).type,
                source_pi: rel.source_pi
              }] AS edges
       LIMIT $limit
@@ -256,8 +260,12 @@ export async function handlePathsReachable(
              path_length AS length,
              [rel IN relationships(path) | {
                subject_id: startNode(rel).canonical_id,
+               subject_label: startNode(rel).label,
+               subject_type: startNode(rel).type,
                predicate: rel.predicate,
                object_id: endNode(rel).canonical_id,
+               object_label: endNode(rel).label,
+               object_type: endNode(rel).type,
                source_pi: rel.source_pi
              }] AS edges
     `;
