@@ -13,6 +13,8 @@ import {
   GetLineageResponse,
   LineagePiNode,
   LineageDirection,
+  ParentCollectionRequest,
+  ParentCollectionResponse,
 } from '../types';
 
 interface LineageMatch {
@@ -335,6 +337,76 @@ export async function handleGetLineage(
   } catch (error: any) {
     return errorResponse(
       error.message || 'Failed to get lineage',
+      error.code,
+      { stack: error.stack }
+    );
+  }
+}
+
+/**
+ * POST /pi/parent-collection
+ * Find the nearest collection in a PI's ancestry chain
+ * Used for permission checks when creating/modifying collections
+ */
+export async function handleFindParentCollection(
+  env: Env,
+  body: ParentCollectionRequest
+): Promise<Response> {
+  try {
+    const { pi } = body;
+
+    if (!pi) {
+      return errorResponse(
+        'Missing required field: pi',
+        ERROR_CODES.VALIDATION_ERROR,
+        null,
+        400
+      );
+    }
+
+    // Query checks the source PI first (hops=0), then traverses ancestors
+    // Looking for any PI with is_collection_root=true in its properties
+    const query = `
+      MATCH (source:Entity {canonical_id: $pi, type: 'pi'})
+      OPTIONAL MATCH path = (source)-[:CHILD_OF*0..100]->(ancestor:Entity {type: 'pi'})
+      WITH ancestor,
+           CASE WHEN path IS NULL THEN 0 ELSE length(path) END AS hops,
+           apoc.convert.fromJsonMap(coalesce(ancestor.properties, '{}')) AS props
+      WHERE props.is_collection_root = true
+      RETURN ancestor.canonical_id AS rootPi,
+             props.collection_id AS collectionId,
+             hops
+      ORDER BY hops ASC
+      LIMIT 1
+    `;
+
+    const { records } = await executeQuery(env, query, { pi });
+
+    if (records.length === 0) {
+      const response: ParentCollectionResponse = {
+        hasParentCollection: false,
+      };
+      return jsonResponse(response);
+    }
+
+    const record = records[0];
+    const hops = typeof record.get('hops') === 'object'
+      ? record.get('hops').toNumber()
+      : record.get('hops');
+
+    const response: ParentCollectionResponse = {
+      hasParentCollection: true,
+      parentCollection: {
+        collectionId: record.get('collectionId'),
+        rootPi: record.get('rootPi'),
+        hops,
+      },
+    };
+
+    return jsonResponse(response);
+  } catch (error: any) {
+    return errorResponse(
+      error.message || 'Failed to find parent collection',
       error.code,
       { stack: error.stack }
     );

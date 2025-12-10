@@ -13,7 +13,7 @@ import {
   handleEntityExists,
   handleLookupByCode,
 } from './handlers/entity';
-import { handleFindInLineage, handleGetLineage } from './handlers/hierarchy';
+import { handleFindInLineage, handleGetLineage, handleFindParentCollection } from './handlers/hierarchy';
 import {
   handleCreateRelationships,
   handleMergeRelationships,
@@ -37,6 +37,7 @@ interface RouteTable {
 const routes: RouteTable = {
   'POST /pi/create': handleCreatePI,
   'POST /pi/lineage': handleGetLineage,
+  'POST /pi/parent-collection': handleFindParentCollection,
   'POST /pi/entities-with-relationships': handleGetPIEntitiesWithRelationships,
   'POST /entity/create': handleCreateEntity,
   'POST /entity/merge': handleMergeEntity,
@@ -58,6 +59,7 @@ const routes: RouteTable = {
 const ENDPOINTS = [
   'POST /pi/create',
   'POST /pi/lineage',
+  'POST /pi/parent-collection',
   'POST /pi/entities-with-relationships',
   'POST /pi/:pi/purge',
   'POST /entity/create',

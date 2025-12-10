@@ -63,3 +63,22 @@ export interface GetLineageResponse {
   ancestors?: LineageDirection;
   descendants?: LineageDirection;
 }
+
+/**
+ * Request to find parent collection in PI ancestry
+ */
+export interface ParentCollectionRequest {
+  pi: string;
+}
+
+/**
+ * Response from parent-collection query
+ */
+export interface ParentCollectionResponse {
+  hasParentCollection: boolean;
+  parentCollection?: {
+    collectionId: string;
+    rootPi: string;
+    hops: number;
+  };
+}
